@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#2563eb"
+
+[server]
+headless = true
+# The fixture bootstrap writes into data/processed and outputs/ on first
+# run; the file watcher would otherwise restart the app mid-build.
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
