@@ -1,0 +1,194 @@
+# FloodWatch
+
+Multimodal flood risk prediction and emergency response — 3rd-year ML project.
+
+Anchored to a single documented historical event (**Kerala 2018**) so the system
+can be validated against what actually happened, rather than making untested
+predictions.
+
+---
+
+## Quickstart (works on a fresh clone, no credentials)
+
+```bash
+pip install -r requirements-dev.txt   # full local env
+./scripts/run_pipeline.sh             # fixture -> dataset -> features -> train -> evaluate -> forecast
+streamlit run dashboard/app.py        # dashboard
+python -m pytest tests/ -v            # leakage + forecasting tests
+```
+
+Deploying it to a public URL: see **[DEPLOY.md](DEPLOY.md)**. The app
+self-heals on a fresh clone — `src/pipeline.py` rebuilds every missing
+artifact from the committed fixture on startup, so a cloud deploy works with
+no manual steps. `requirements.txt` is the slim deploy set; `requirements-dev.txt`
+is the full one.
+
+This runs on a **synthetic test fixture**, so everything works on day one and
+nobody is blocked waiting for data downloads.
+
+> ### ⚠️ The fixture is not training data
+> `src/data/make_fixture.py` generates fake data whose only job is to prove the
+> pipeline works. **No number produced from it goes in your report.** Every
+> reported result must come from real observational data. The pipeline prints a
+> loud warning whenever it is running on the fixture, and the dashboard shows a
+> banner.
+
+---
+
+## Switching to real data
+
+One line in `config.yaml`:
+
+```yaml
+data:
+  source: real      # was: fixture
+```
+
+Then implement the four loader functions in `src/data/loaders.py`. They are
+the **only** place that needs to know each source's file quirks — everything
+downstream is already written and tested against the canonical schema.
+
+| Table | Source | What to implement |
+|---|---|---|
+| `rainfall` | IMD daily rainfall via [data.gov.in](https://data.gov.in) | Reshape wide/monthly files to long `date, district, rainfall_mm` |
+| `river` | India-WRIS (CWC) gauge readings | Map stations to districts by lat/lon, aggregate to district-day **max** |
+| `terrain` | SRTM DEM | One-off zonal stats job (rasterio + district boundaries); write CSV once |
+| `labels` | [Dartmouth Flood Observatory](https://floodobservatory.colorado.edu/) archive | Expand each event (begin/end date + area) into district-days |
+
+**The labels are the hard part.** DFO gives one row per event with a coarse
+spatial extent; you must decide which districts each event covers and document
+that decision. It is the single biggest source of label noise in the project
+and your report should say so explicitly.
+
+---
+
+## What's in the box
+
+```
+src/
+  config.py                  config.yaml loader (single source of truth)
+  data/
+    make_fixture.py          synthetic fixture generator  [NOT training data]
+    loaders.py               canonical schemas + real-data loaders to fill in
+    build_dataset.py         joins sources, documented missing-value policy
+  features/
+    build_features.py        lags, rolling, departure, antecedent wetness,
+                             terrain interactions, target shift, splits
+  models/
+    train_risk.py            Logistic / Random Forest / XGBoost
+    evaluate.py              lead time, cost threshold, calibration, ROC/PR
+    explain.py               SHAP global + per-district-day local
+    forecast.py              persistence / climatology / ARIMA / LSTM
+dashboard/app.py             Streamlit + Folium, historical replay
+tests/test_no_leakage.py     leakage guards for the classifier
+tests/test_forecast.py       baseline-correctness + metric guards
+```
+
+### Forecasting (`src/models/forecast.py`)
+
+```bash
+python -m src.models.forecast                       # river level
+python -m src.models.forecast --target rainfall_mm  # rainfall
+python -m src.models.forecast --no-lstm             # skip the network
+```
+
+**The question is not "did the LSTM work" — it is "can anything beat
+persistence?"** River levels are strongly autocorrelated, so "tomorrow equals
+today" is a hard baseline to beat, and plenty of published hydrological deep
+learning quietly fails to beat it. Every model is therefore scored with a
+**skill score**:
+
+```
+skill = 1 - MAE_model / MAE_persistence       >0 better · <0 worse than doing nothing
+```
+
+Report negative skill if you get it. A measured, explained failure is a
+finding; a hidden one is a problem waiting for the viva.
+
+**MAPE is suppressed on rainfall.** It is undefined wherever the true value is
+zero, and rainfall is zero most days. The module reports sMAPE instead and
+says so. (Watch out: on zero-inflated series sMAPE saturates near 200% for
+every model, so it barely discriminates — use MAE to rank.)
+
+**ARIMA walks forward without refitting.** It is fitted once on train, then
+advanced through the test period with `append(refit=False)`, so each forecast
+origin only ever sees past data. Refitting at every origin is more rigorous
+and far too slow for 8 districts × 2 years — state that compromise in the
+report rather than leaving it implicit.
+
+---
+
+## Two design decisions worth defending in the viva
+
+**1. We predict forward, not sideways.**
+The target is a flood at `t + horizon` using only features available at `t`
+(default horizon: 1 day). Predicting today's flood from today's rainfall gives
+a beautiful ROC curve and **zero warning time**, which is useless. Change the
+horizon with `--horizon 3`.
+
+**2. Accuracy is not the headline metric. Lead time is.**
+A model that is 95% accurate with 40 minutes of warning saves nobody; one that
+is 80% accurate with 18 hours saves a district. `evaluate.py` reports median
+lead time per event — alongside the **alarm duty cycle**, because lead time
+alone is gameable: a model that keeps the alarm on all monsoon shows enormous
+lead time and is operationally worthless. Good systems have long lead time
+*and* a low duty cycle.
+
+Also deliberate:
+
+- **The threshold is not 0.5.** It is chosen on the validation split to
+  minimise expected cost at a 20:1 miss-to-false-alarm ratio (`config.yaml`),
+  then applied unchanged to test. Picking it on test would be cheating.
+- **Calibration is reported** (Brier + reliability curve). If the model says
+  70%, it should flood ~70% of the time, or an officer cannot act on it.
+- **Logistic Regression is a real baseline.** If RF and XGBoost don't beat it,
+  report that. It's a finding, not a failure.
+- **Climatology is fitted on the training period only** — a subtle and very
+  common leak.
+
+---
+
+## Team split (4 people, all start week 1)
+
+| Owner | Module | Files |
+|---|---|---|
+| **P1** | Data pipeline + risk classifier | `src/data/`, `src/models/train_risk.py` |
+| **P2** | Forecasting (ARIMA + LSTM) | `src/models/forecast.py` *(to write)* |
+| **P3** | Speech + NLP citizen reports | `src/nlp/` *(to write)* |
+| **P4** | Dashboard + integration | `dashboard/`, fusion layer |
+
+**P4 starts in week 1 against the fixture.** Teams that leave integration to
+week 7 are the teams that demo a broken system.
+
+---
+
+## 8-week plan
+
+| Week | Deliverable |
+|---|---|
+| 1 | Lock anchor event; download rainfall + river data; dashboard skeleton running |
+| 2 | Real loaders implemented; dataset built; EDA |
+| 3–4 | Risk classifier: baseline → RF → XGBoost, + SHAP |
+| 4–5 | Forecasting: ARIMA vs LSTM, chronological splits |
+| 5–6 | Whisper transcription + report classifier |
+| 6–7 | Fusion logic + dashboard integration |
+| 8 | Evaluation, error analysis, report, **demo rehearsal** |
+
+Stretch goals, only once the core runs end to end: satellite segmentation
+(use **Sen1Floods11**, never raw Sentinel-1), road reachability via OSMnx +
+NetworkX, population impact overlay (WorldPop), and the flash-flood track on
+half-hourly GPM IMERG.
+
+---
+
+## Honest-reporting rules
+
+1. No number from the fixture appears in the report.
+2. Report recall before accuracy — recall is the metric that corresponds to
+   people not being warned.
+3. Report the bad numbers too. Measured, explained limitations score better
+   than hidden ones, and far better than ones found for you in the viva.
+4. Document dataset lineage: source, download date, URL, licence, coverage,
+   record counts, and every preprocessing step.
+5. The system recommends; a human decides. Never frame it as automated
+   evacuation.

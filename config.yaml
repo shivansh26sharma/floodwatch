@@ -1,0 +1,108 @@
+# ============================================================
+# FloodWatch configuration
+# ------------------------------------------------------------
+# Switching from the synthetic test fixture to real data is a
+# ONE-LINE change: set data.source to "real" and fill in the
+# paths under data.real.
+# ============================================================
+
+project:
+  name: FloodWatch
+  anchor_event: "Kerala 2018"
+  # Region of study. Districts listed here are the modelling units.
+  region: Kerala
+  districts:
+    - Alappuzha
+    - Ernakulam
+    - Idukki
+    - Kottayam
+    - Pathanamthitta
+    - Thrissur
+    - Wayanad
+    - Palakkad
+
+data:
+  # "fixture" = synthetic data for pipeline testing ONLY.
+  # "real"    = the actual downloaded datasets.
+  source: fixture
+
+  fixture:
+    path: data/fixtures
+    start_date: "2010-01-01"
+    end_date: "2019-12-31"
+    seed: 42
+
+  real:
+    # Fill these in once the real downloads land in data/raw/
+    rainfall: data/raw/imd_rainfall.csv       # IMD daily rainfall via data.gov.in
+    river: data/raw/wris_river_levels.csv     # India-WRIS / CWC gauge readings
+    terrain: data/raw/srtm_terrain.csv        # Derived from SRTM DEM
+    labels: data/raw/dfo_flood_events.csv     # Dartmouth Flood Observatory archive
+
+  processed: data/processed/dataset.parquet
+
+features:
+  # Lag windows in days for rainfall and river level
+  lags: [1, 2, 3, 5, 7]
+  rolling_windows: [3, 7, 14, 30]
+  # Antecedent wetness proxy: cumulative rainfall over this many days
+  antecedent_window: 15
+  # Rainfall departure is computed against the day-of-year climatology
+  climatology_min_years: 5
+
+split:
+  # STRICTLY CHRONOLOGICAL. Never shuffle time series.
+  train_end: "2016-12-31"
+  val_end: "2017-12-31"
+  # Everything after val_end is the test set (includes the 2018 event)
+
+models:
+  target: flood_occurred
+  random_state: 42
+  logistic:
+    max_iter: 2000
+    class_weight: balanced
+  random_forest:
+    n_estimators: 400
+    max_depth: 12
+    min_samples_leaf: 5
+    class_weight: balanced
+  xgboost:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+forecast:
+  # What we forecast. river_level_m is the primary target: it is smoother,
+  # more autocorrelated and directly flood-relevant. rainfall_mm is much
+  # harder (zero-inflated) — see the note in src/models/forecast.py.
+  target: river_level_m
+  exog: [rainfall_mm]          # additional inputs the LSTM may use
+  horizons: [1, 3, 7]          # days ahead to evaluate
+  arima_order: [2, 0, 2]       # (p, d, q); see module docstring on selection
+  lstm:
+    window: 30                 # days of history fed to the network
+    hidden: 48
+    layers: 1
+    dropout: 0.1
+    epochs: 40
+    batch_size: 128
+    lr: 0.003
+    patience: 6                # early stopping on validation MAE
+
+evaluation:
+  # Missing a real flood is far worse than a false alarm.
+  # Threshold is chosen to minimise expected cost, not to maximise F1.
+  cost_false_negative: 20
+  cost_false_positive: 1
+  # Lead time is measured as hours between first threshold crossing
+  # and recorded flood onset.
+  lead_time_units: hours
+  calibration_bins: 10
+
+outputs:
+  figures: outputs/figures
+  models: outputs/models
+  reports: outputs/reports
