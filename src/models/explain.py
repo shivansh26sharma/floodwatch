@@ -33,7 +33,9 @@ from src.features.build_features import TARGET, chronological_split
 try:
     import shap
     HAS_SHAP = True
-except ImportError:  # pragma: no cover
+except Exception:  # noqa: BLE001  pragma: no cover
+    # Broad on purpose: see the note in train_risk.py. A dependency that
+    # imports but cannot load its native library must degrade, not crash.
     HAS_SHAP = False
 
 

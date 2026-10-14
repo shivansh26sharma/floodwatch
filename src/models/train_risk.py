@@ -37,8 +37,14 @@ from src.features.build_features import TARGET, chronological_split, feature_col
 try:
     from xgboost import XGBClassifier
     HAS_XGB = True
-except ImportError:  # pragma: no cover
+    XGB_ERROR = ""
+except Exception as _exc:  # noqa: BLE001  pragma: no cover
+    # Deliberately broad. xgboost can be pip-installed yet fail to load its
+    # native libxgboost.dylib (macOS without libomp), which raises
+    # XGBoostError, not ImportError. Catching only ImportError here turned a
+    # graceful skip into a crash of the whole pipeline.
     HAS_XGB = False
+    XGB_ERROR = str(_exc).strip().splitlines()[0] if str(_exc).strip() else type(_exc).__name__
 
 
 def build_models() -> dict:
@@ -74,7 +80,11 @@ def build_models() -> dict:
             n_jobs=-1,
         )
     else:
-        print("[train] xgboost not installed — skipping. pip install xgboost")
+        print(f"[train] xgboost unavailable — skipping it. Reason: {XGB_ERROR}")
+        if "libomp" in XGB_ERROR or "libxgboost" in XGB_ERROR:
+            print("[train]   macOS fix:  brew install libomp")
+        else:
+            print("[train]   fix:  pip install xgboost")
 
     return models
 
