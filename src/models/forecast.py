@@ -67,13 +67,13 @@ try:
     import torch
     import torch.nn as nn
     HAS_TORCH = True
-except ImportError:  # pragma: no cover
+except Exception:  # noqa: BLE001  pragma: no cover
     HAS_TORCH = False
 
 try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
     HAS_SM = True
-except ImportError:  # pragma: no cover
+except Exception:  # noqa: BLE001  pragma: no cover
     HAS_SM = False
 
 
