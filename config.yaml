@@ -9,17 +9,22 @@
 project:
   name: FloodWatch
   anchor_event: "Kerala 2018"
-  # Region of study. Districts listed here are the modelling units.
-  region: Kerala
-  districts:
-    - Alappuzha
-    - Ernakulam
-    - Idukki
-    - Kottayam
-    - Pathanamthitta
-    - Thrissur
-    - Wayanad
-    - Palakkad
+  region: India
+
+  # Which districts to study. Accepts:
+  #   all                  every district in src/data/districts.py (~70)
+  #   basin:Brahmaputra    a single river basin
+  #   state:Kerala         a single state
+  #   [Patna, Dhubri]      an explicit list
+  # Nationwide is the default: it gives the DFO archive far more events to
+  # label, which is what keeps a training split from ending up empty.
+  districts: all
+
+  # Study period. WIDE ON PURPOSE. Real flood archives record only LARGE
+  # events, so a narrow window can leave a split with zero positives and
+  # nothing to learn from. ERA5, GloFAS and DFO all cover this range.
+  start_date: "2000-01-01"
+  end_date: "2023-12-31"
 
 data:
   # "fixture" = synthetic data for pipeline testing ONLY.
@@ -28,15 +33,18 @@ data:
 
   fixture:
     path: data/fixtures
-    start_date: "2010-01-01"
-    end_date: "2019-12-31"
+    # Dates come from project.start_date / project.end_date.
     seed: 42
+    # The fixture only has to prove the pipeline runs, so it covers a
+    # subset of districts. Generating all ~70 over 24 years would make the
+    # cloud bootstrap slow for no benefit.
+    max_districts: 8
 
   real:
     # Fill these in once the real downloads land in data/raw/
-    rainfall: data/raw/imd_rainfall.csv       # IMD daily rainfall via data.gov.in
-    river: data/raw/wris_river_levels.csv     # India-WRIS / CWC gauge readings
-    terrain: data/raw/srtm_terrain.csv        # Derived from SRTM DEM
+    rainfall: data/raw/rainfall_era5.csv      # written by src/data/download.py
+    river: data/raw/river_glofas.csv          # written by src/data/download.py
+    terrain: data/raw/terrain_elevation.csv   # written by src/data/download.py
     labels: data/raw/dfo_flood_events.csv     # Dartmouth Flood Observatory archive
 
   processed: data/processed/dataset.parquet
@@ -52,8 +60,12 @@ features:
 
 split:
   # STRICTLY CHRONOLOGICAL. Never shuffle time series.
-  train_end: "2016-12-31"
-  val_end: "2017-12-31"
+  # Boundaries chosen so the anchor event (Kerala 2018) lands in TEST while
+  # train still spans 15 years — enough for sparse DFO events to appear in
+  # every split. Check the class counts the trainer prints; if any split
+  # shows 0.00% positive, widen project.start_date rather than shuffling.
+  train_end: "2014-12-31"
+  val_end: "2016-12-31"
   # Everything after val_end is the test set (includes the 2018 event)
 
 models:
@@ -75,10 +87,10 @@ models:
     colsample_bytree: 0.8
 
 forecast:
-  # What we forecast. river_level_m is the primary target: it is smoother,
+  # What we forecast. river_discharge_m3s is the primary target: it is smoother,
   # more autocorrelated and directly flood-relevant. rainfall_mm is much
   # harder (zero-inflated) — see the note in src/models/forecast.py.
-  target: river_level_m
+  target: river_discharge_m3s
   exog: [rainfall_mm]          # additional inputs the LSTM may use
   horizons: [1, 3, 7]          # days ahead to evaluate
   arima_order: [2, 0, 2]       # (p, d, q); see module docstring on selection

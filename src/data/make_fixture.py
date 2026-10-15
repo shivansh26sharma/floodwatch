@@ -44,8 +44,12 @@ def generate(seed: int | None = None) -> dict[str, pd.DataFrame]:
     seed = seed if seed is not None else cfg.data.fixture.seed
     rng = np.random.default_rng(seed)
 
-    districts = list(cfg.project.districts)
-    dates = pd.date_range(cfg.data.fixture.start_date, cfg.data.fixture.end_date, freq="D")
+    from src.data import districts as dref
+    districts = dref.selected()
+    cap = int(getattr(cfg.data.fixture, "max_districts", 0) or 0)
+    if cap and len(districts) > cap:
+        districts = districts[:cap]
+    dates = pd.date_range(cfg.project.start_date, cfg.project.end_date, freq="D")
     doy = dates.dayofyear.to_numpy()
 
     # ---- terrain: static per district -------------------------------
@@ -54,9 +58,11 @@ def generate(seed: int | None = None) -> dict[str, pd.DataFrame]:
             "district": districts,
             "mean_elevation_m": rng.uniform(5, 900, len(districts)).round(1),
             "mean_slope_deg": rng.uniform(0.4, 14.0, len(districts)).round(2),
-            "drainage_density": rng.uniform(0.2, 1.8, len(districts)).round(3),
-            "lat": rng.uniform(8.3, 12.2, len(districts)).round(4),
-            "lon": rng.uniform(74.9, 77.4, len(districts)).round(4),
+            "terrain_ruggedness_m": rng.uniform(5.0, 180.0, len(districts)).round(1),
+            "lat": [dref.INDIA_FLOOD_DISTRICTS[d][0] for d in districts],
+            "lon": [dref.INDIA_FLOOD_DISTRICTS[d][1] for d in districts],
+            "state": [dref.INDIA_FLOOD_DISTRICTS[d][2] for d in districts],
+            "basin": [dref.INDIA_FLOOD_DISTRICTS[d][3] for d in districts],
         }
     )
     # Low, flat districts flood more easily — encode that in a susceptibility term.
@@ -64,7 +70,7 @@ def generate(seed: int | None = None) -> dict[str, pd.DataFrame]:
         1.6
         - 0.0011 * terrain["mean_elevation_m"]
         - 0.055 * terrain["mean_slope_deg"]
-        + 0.35 * terrain["drainage_density"]
+        + 0.0035 * terrain["terrain_ruggedness_m"]
     ).clip(0.15, 2.0)
     susceptibility.index = terrain["district"]
 
@@ -91,15 +97,20 @@ def generate(seed: int | None = None) -> dict[str, pd.DataFrame]:
             pd.DataFrame({"date": dates, "district": district, "rainfall_mm": rainfall})
         )
 
-        # River level: lagged, damped accumulation of rainfall + baseflow.
+        # River discharge (m3/s): lagged, damped routing of rainfall plus a
+        # baseflow floor. Magnitudes are chosen to sit in the same range as
+        # GloFAS output for catchments this size, so the fixture exercises
+        # the pipeline at realistic scale.
         level = np.zeros(len(dates))
         store = 0.0
         for i, r in enumerate(rainfall):
             store = 0.86 * store + 0.14 * r           # catchment storage
-            level[i] = 1.2 + 0.055 * store + rng.normal(0, 0.06)
+            level[i] = 25.0 + 11.0 * store + rng.normal(0, 3.0)
+        level = np.clip(level, 1.0, None)
         river_rows.append(
             pd.DataFrame(
-                {"date": dates, "district": district, "river_level_m": level.round(3)}
+                {"date": dates, "district": district,
+                 "river_discharge_m3s": level.round(2)}
             )
         )
 
@@ -144,7 +155,7 @@ def generate(seed: int | None = None) -> dict[str, pd.DataFrame]:
     # pipeline's missing-value handling is actually exercised.
     for key in ("rainfall", "river"):
         df = frames[key]
-        col = "rainfall_mm" if key == "rainfall" else "river_level_m"
+        col = "rainfall_mm" if key == "rainfall" else "river_discharge_m3s"
         holes = rng.random(len(df)) < 0.012
         df.loc[holes, col] = np.nan
 
