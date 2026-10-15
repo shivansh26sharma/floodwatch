@@ -45,7 +45,7 @@ data:
     rainfall: data/raw/rainfall_era5.csv      # written by src/data/download.py
     river: data/raw/river_glofas.csv          # written by src/data/download.py
     terrain: data/raw/terrain_elevation.csv   # written by src/data/download.py
-    labels: data/raw/dfo_flood_events.csv     # Dartmouth Flood Observatory archive
+    labels: data/raw/Global_Flood_Records.gpkg  # DFO GeoPackage (polygons) — see README
 
   processed: data/processed/dataset.parquet
 
