@@ -49,6 +49,7 @@ Copernicus Emergency Management Service. Cite all three.
 
 import argparse
 import json
+import ssl
 import time
 import urllib.parse
 import urllib.request
@@ -66,6 +67,25 @@ FLOOD_URL = "https://flood-api.open-meteo.com/v1/flood"
 ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
 
 USER_AGENT = "FloodWatch/1.0 (student research project)"
+
+# TLS trust store.
+# Python installed from python.org (and most standalone builds) does NOT use
+# the macOS keychain, so urllib has no CA certificates and every HTTPS call
+# dies with "CERTIFICATE_VERIFY_FAILED: unable to get local issuer
+# certificate". certifi ships Mozilla's CA bundle, so we point at that
+# explicitly and the script works the same on macOS, Linux and Windows.
+#
+# The alternative — running "Install Certificates.command" from your Python
+# install — fixes it machine-wide but is easy to forget and impossible to
+# reproduce on someone else's laptop. Doing it in code is reproducible.
+#
+# NEVER "fix" this by disabling verification (ssl._create_unverified_context
+# or verify=False). That silently accepts any certificate.
+try:
+    import certifi
+    SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except ImportError:  # pragma: no cover
+    SSL_CONTEXT = ssl.create_default_context()
 TIMEOUT = 90
 RETRIES = 4
 PAUSE_SECONDS = 1.2          # be polite to a free service
@@ -84,7 +104,9 @@ def fetch_json(url: str, params: dict) -> dict:
     for attempt in range(1, RETRIES + 1):
         try:
             req = urllib.request.Request(full, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            with urllib.request.urlopen(
+                req, timeout=TIMEOUT, context=SSL_CONTEXT
+            ) as resp:
                 return json.loads(resp.read().decode())
         except Exception as exc:  # noqa: BLE001
             last = exc
@@ -93,10 +115,20 @@ def fetch_json(url: str, params: dict) -> dict:
                 print(f"    attempt {attempt} failed ({exc}); retrying in {wait}s")
                 time.sleep(wait)
 
+    hint = (
+        "If this is a network restriction, run this script on a machine with "
+        "normal internet access — it only needs outbound HTTPS."
+    )
+    if "CERTIFICATE_VERIFY" in str(last):
+        hint = (
+            "Your Python has no CA bundle. Install certifi and retry:\n"
+            "    pip install certifi\n"
+            "On macOS you can also run the installer's certificate script:\n"
+            "    /Applications/Python\\ 3.x/Install\\ Certificates.command\n"
+            "Do NOT disable certificate verification to get past this."
+        )
     raise RuntimeError(
-        f"Failed after {RETRIES} attempts: {full}\nLast error: {last}\n"
-        f"If this is a network restriction, run this script on a machine with "
-        f"normal internet access — it only needs outbound HTTPS."
+        f"Failed after {RETRIES} attempts: {full}\nLast error: {last}\n{hint}"
     )
 
 

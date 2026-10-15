@@ -16,6 +16,7 @@ pandas>=2.0
 numpy>=1.24
 pyarrow>=14.0
 pyyaml>=6.0
+certifi>=2024.0           # CA bundle; macOS Python has none of its own
 
 scikit-learn>=1.3
 shap>=0.44
