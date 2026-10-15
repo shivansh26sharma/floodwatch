@@ -99,8 +99,8 @@ def _lag_and_roll(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Rate of change — a rising river is more dangerous than a high static one.
-    df["river_level_delta_1d"] = g["river_discharge_m3s"].diff(1)
-    df["river_level_delta_3d"] = g["river_discharge_m3s"].diff(3)
+    df["river_discharge_delta_1d"] = g["river_discharge_m3s"].diff(1)
+    df["river_discharge_delta_3d"] = g["river_discharge_m3s"].diff(3)
 
     return df
 

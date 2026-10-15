@@ -58,9 +58,22 @@ Do not delete it.**
 
 ### Then the labels, which are a manual download
 
-Get the Dartmouth Flood Observatory Global Active Archive from
-<https://floodobservatory.colorado.edu/Archives/index.html> and save it as
-`data/raw/dfo_flood_events.csv`. Then:
+From the DFO Zenodo record <https://doi.org/10.5281/zenodo.19288170>
+download **`Global_Flood_Records.gpkg`** and save it as
+`data/raw/Global_Flood_Records.gpkg`.
+
+**Take the GeoPackage, not the CSV.** DFO's redesigned v0.9.0 release
+dropped the free-text location column its older archive carried — the CSV
+now identifies an event only by *country*, which cannot place a district.
+The GeoPackage carries the actual flood polygon per event, so districts are
+labelled by a spatial join: a district is flooded on a day if its point
+falls inside that event's footprint. That is strictly better than text
+matching — no name collisions, and no state-level fallback smearing one
+district's flood across a whole state.
+
+The data is CC0 / CC-BY-4.0, so you may redistribute it. Cite it anyway.
+
+Then:
 
 ```bash
 # config.yaml
@@ -96,13 +109,18 @@ not ROC-AUC, which flatters badly at this imbalance. If a split ends up with
 zero flood days the trainer stops with an explanation; widen
 `project.start_date` rather than shuffling the split.
 
-**Label attribution.** DFO gives free-text locations, not district polygons.
-The loader matches in three tiers: district named outright, else state named
-(spread across every studied district in that state), else skipped as too
-vague. It prints the counts for each tier every run. The state-level tier
-over-attributes — a flood that hit only coastal Alappuzha gets labelled
-state-wide. **This is the single largest source of label noise in the
-project.** Quote those printed counts in your limitations section.
+**Label attribution.** Labels come from a spatial join against DFO event
+polygons, which is precise, but three caveats remain and the loader prints
+the numbers for each run:
+
+- DFO footprints are satellite-derived and generally coarser than a
+  district, sometimes a bounding region rather than observed inundation. A
+  district inside the footprint counts as flooded even if only part of it
+  was.
+- We test the district headquarters *point*, not its area, so a district
+  whose HQ sits just outside a footprint reads as dry.
+- Districts that no event ever intersected contribute only negatives. The
+  loader names them — say how many there were.
 
 ### Narrowing the study region
 
