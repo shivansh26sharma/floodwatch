@@ -37,14 +37,8 @@ from src.features.build_features import TARGET, chronological_split, feature_col
 try:
     from xgboost import XGBClassifier
     HAS_XGB = True
-    XGB_ERROR = ""
-except Exception as _exc:  # noqa: BLE001  pragma: no cover
-    # Deliberately broad. xgboost can be pip-installed yet fail to load its
-    # native libxgboost.dylib (macOS without libomp), which raises
-    # XGBoostError, not ImportError. Catching only ImportError here turned a
-    # graceful skip into a crash of the whole pipeline.
+except ImportError:  # pragma: no cover
     HAS_XGB = False
-    XGB_ERROR = str(_exc).strip().splitlines()[0] if str(_exc).strip() else type(_exc).__name__
 
 
 def build_models() -> dict:
@@ -80,11 +74,7 @@ def build_models() -> dict:
             n_jobs=-1,
         )
     else:
-        print(f"[train] xgboost unavailable — skipping it. Reason: {XGB_ERROR}")
-        if "libomp" in XGB_ERROR or "libxgboost" in XGB_ERROR:
-            print("[train]   macOS fix:  brew install libomp")
-        else:
-            print("[train]   fix:  pip install xgboost")
+        print("[train] xgboost not installed — skipping. pip install xgboost")
 
     return models
 
@@ -114,6 +104,36 @@ def train(horizon: int = 1, save: bool = True) -> dict:
         print(f"[train]   {name:6s} {len(part):>7,} rows  "
               f"{part[TARGET].mean():>6.2%} positive  "
               f"{part['date'].min().date()} .. {part['date'].max().date()}")
+
+    # ---- the sparse-label guard ---------------------------------------
+    # Real flood archives record only LARGE events, so a split can easily
+    # contain zero positives — at which point sklearn raises a cryptic
+    # "needs samples of at least 2 classes". Fail here instead, with the
+    # actual numbers and the actual fix.
+    empty = {
+        name: int(part[TARGET].sum())
+        for name, part in splits.items()
+        if part[TARGET].sum() == 0
+    }
+    if empty:
+        counts = "\n".join(
+            f"    {n:6s} {int(p[TARGET].sum()):>4} positives in {len(p):,} rows "
+            f"({p['date'].min().date()} .. {p['date'].max().date()})"
+            for n, p in splits.items()
+        )
+        raise ValueError(
+            f"No flood days in split(s): {sorted(empty)}. Nothing to learn from.\n"
+            f"{counts}\n\n"
+            f"This is the normal failure mode with real DFO labels — large\n"
+            f"events are sparse and can miss a window entirely. Fixes, best\n"
+            f"first:\n"
+            f"  1. Widen project.start_date in config.yaml (DFO covers 1985+,\n"
+            f"     and ERA5/GloFAS go back just as far) and re-download.\n"
+            f"  2. Move split.train_end / split.val_end so each window spans\n"
+            f"     some recorded events — keep the anchor event in test.\n"
+            f"  3. Add districts in project.districts to catch more events.\n"
+            f"Do NOT shuffle the split to fix this: that leaks the future."
+        )
 
     trained, predictions = {}, {}
     for name, model in build_models().items():

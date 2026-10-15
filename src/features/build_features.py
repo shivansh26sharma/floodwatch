@@ -37,7 +37,7 @@ ID_COLS = ["district", "date"]
 # Columns never fed to a model
 NON_FEATURES = {
     "flood_occurred", TARGET, "district", "date", "lat", "lon",
-    "rainfall_mm_was_missing", "river_level_m_was_missing",
+    "rainfall_mm_was_missing", "river_discharge_m3s_was_missing",
 }
 
 
@@ -76,7 +76,7 @@ def _lag_and_roll(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(ID_COLS).copy()
     g = df.groupby("district", group_keys=False)
 
-    for col in ("rainfall_mm", "river_level_m"):
+    for col in ("rainfall_mm", "river_discharge_m3s"):
         for lag in cfg.lags:
             df[f"{col}_lag{lag}"] = g[col].shift(lag)
 
@@ -99,8 +99,8 @@ def _lag_and_roll(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Rate of change — a rising river is more dangerous than a high static one.
-    df["river_level_delta_1d"] = g["river_level_m"].diff(1)
-    df["river_level_delta_3d"] = g["river_level_m"].diff(3)
+    df["river_level_delta_1d"] = g["river_discharge_m3s"].diff(1)
+    df["river_level_delta_3d"] = g["river_discharge_m3s"].diff(3)
 
     return df
 
@@ -131,7 +131,7 @@ def _add_terrain_interactions(df: pd.DataFrame) -> pd.DataFrame:
     # Physically motivated: the same rainfall is more dangerous on flat,
     # low-lying, well-drained-into terrain.
     df["rain_x_inv_slope"] = df["rainfall_mm"] / (df["mean_slope_deg"] + 1.0)
-    df["antecedent_x_drainage"] = df["antecedent_rain_mm"] * df["drainage_density"]
+    df["antecedent_x_ruggedness"] = df["antecedent_rain_mm"] * df["terrain_ruggedness_m"]
     df["elevation_inv"] = 1.0 / (df["mean_elevation_m"] + 10.0)
     return df
 

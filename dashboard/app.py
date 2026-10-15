@@ -172,7 +172,7 @@ c1.metric("Districts at alert", int(today["alert"].sum()))
 c2.metric("Highest risk", f"{today['risk'].max():.1%}",
           today.iloc[0]["district"])
 c3.metric("Mean rainfall", f"{today['rainfall_mm'].mean():.1f} mm")
-c4.metric("Mean river level", f"{today['river_level_m'].mean():.2f} m")
+c4.metric("Mean river level", f"{today['river_discharge_m3s'].mean():.2f} m")
 
 st.divider()
 
@@ -205,7 +205,7 @@ with left:
                     f"<b>{r['district']}</b><br>"
                     f"Risk: {r['risk']:.1%}<br>"
                     f"Rainfall: {r['rainfall_mm']:.1f} mm<br>"
-                    f"River: {r['river_level_m']:.2f} m"
+                    f"River: {r['river_discharge_m3s']:.2f} m"
                 ),
             ).add_to(fmap)
 
@@ -218,10 +218,10 @@ with left:
 with right:
     st.subheader("Ranked districts")
     st.dataframe(
-        today[["district", "risk", "rainfall_mm", "river_level_m", "alert"]]
+        today[["district", "risk", "rainfall_mm", "river_discharge_m3s", "alert"]]
         .rename(columns={
             "district": "District", "risk": "Risk",
-            "rainfall_mm": "Rain (mm)", "river_level_m": "River (m)",
+            "rainfall_mm": "Rain (mm)", "river_discharge_m3s": "River (m)",
             "alert": "Alert",
         }),
         hide_index=True,
@@ -246,7 +246,7 @@ window = data[
 
 t1, t2 = st.columns(2)
 t1.line_chart(window[["risk"]], height=220)
-t2.line_chart(window[["rainfall_mm", "river_level_m"]], height=220)
+t2.line_chart(window[["rainfall_mm", "river_discharge_m3s"]], height=220)
 
 # ---- 4. explanation ---------------------------------------------------
 st.subheader("Why this risk level?")

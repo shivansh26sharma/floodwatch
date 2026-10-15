@@ -13,7 +13,7 @@ We do NOT blanket-fill everything with zero or the mean.
                    affected rows are dropped. A missing rainfall day is
                    not a zero-rainfall day, and treating it as one
                    would fabricate dry spells.
-  - river_level_m: interpolated the same way, limit 3 days — gauge
+  - river_discharge_m3s: interpolated the same way, limit 3 days — gauge
                    dropouts are common and levels are autocorrelated.
   - terrain      : static, must be complete. Missing values are an error.
 A `was_imputed` flag is kept so the share of imputed rows can be
@@ -42,7 +42,7 @@ def build(save: bool = True) -> pd.DataFrame:
     tables = loaders.load_all()
 
     rainfall = _interpolate_within_district(tables["rainfall"], "rainfall_mm", limit=2)
-    river = _interpolate_within_district(tables["river"], "river_level_m", limit=3)
+    river = _interpolate_within_district(tables["river"], "river_discharge_m3s", limit=3)
 
     terrain = tables["terrain"]
     if terrain.isna().any().any():
@@ -56,14 +56,14 @@ def build(save: bool = True) -> pd.DataFrame:
     )
 
     n_before = len(df)
-    df = df.dropna(subset=["rainfall_mm", "river_level_m", "flood_occurred"])
+    df = df.dropna(subset=["rainfall_mm", "river_discharge_m3s", "flood_occurred"])
     n_dropped = n_before - len(df)
 
     df["flood_occurred"] = df["flood_occurred"].astype(int)
     df = df.sort_values(["district", "date"]).reset_index(drop=True)
 
     imputed_share = (
-        df["rainfall_mm_was_missing"] | df["river_level_m_was_missing"]
+        df["rainfall_mm_was_missing"] | df["river_discharge_m3s_was_missing"]
     ).mean()
 
     print(f"[dataset] {len(df):,} district-days "
