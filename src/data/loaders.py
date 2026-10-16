@@ -176,15 +176,25 @@ def _load_real_labels() -> pd.DataFrame:
     events = events.to_crs("EPSG:4326")
 
     def find(*candidates: str) -> str | None:
-        lowered = {c.lower().strip(): c for c in events.columns}
+        """Match column names ignoring spaces, underscores and case.
+
+        DFO has used "Began"/"Ended", "Start Date"/"End Date" and now
+        "BeginDate"/"EndDate" across releases, so normalise before
+        comparing rather than guessing one spelling.
+        """
+        def norm(x: str) -> str:
+            return x.lower().replace(" ", "").replace("_", "").strip()
+
+        normalised = {norm(c): c for c in events.columns}
         for cand in candidates:
-            for low, original in lowered.items():
-                if cand in low:
+            target = norm(cand)
+            for low, original in normalised.items():
+                if target in low:
                     return original
         return None
 
-    begin_col = find("start date", "began", "begin", "start")
-    end_col = find("end date", "ended", "finish")
+    begin_col = find("begindate", "startdate", "began", "begin", "start")
+    end_col = find("enddate", "ended", "end", "finish")
     if not (begin_col and end_col):
         raise ValueError(
             f"Could not find start/end date columns in {path.name}.\n"

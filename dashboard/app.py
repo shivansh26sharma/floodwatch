@@ -131,8 +131,7 @@ if CFG.data.source == "fixture":
     st.warning(
         "**Running on the synthetic test fixture.** Every number on this page "
         "is fake and exists only to prove the pipeline works. Set "
-        "`data.source: real` in `config.yaml` once the IMD/WRIS/DFO downloads "
-        "are in place.",
+        "`data.source: real` in `config.yaml` and provide the ERA5/GloFAS downloads plus the DFO GeoPackage.",
         icon="⚠️",
     )
 
@@ -172,7 +171,7 @@ c1.metric("Districts at alert", int(today["alert"].sum()))
 c2.metric("Highest risk", f"{today['risk'].max():.1%}",
           today.iloc[0]["district"])
 c3.metric("Mean rainfall", f"{today['rainfall_mm'].mean():.1f} mm")
-c4.metric("Mean river level", f"{today['river_discharge_m3s'].mean():.2f} m")
+c4.metric("Mean discharge", f"{today['river_discharge_m3s'].mean():,.0f} m³/s")
 
 st.divider()
 
@@ -186,7 +185,20 @@ with left:
         from streamlit_folium import st_folium
 
         centre = [today["lat"].mean(), today["lon"].mean()]
-        fmap = folium.Map(location=centre, zoom_start=8, tiles="cartodbpositron")
+        # Fit the zoom to how spread out the districts actually are, so a
+        # nationwide run is not framed like a single state.
+        span = max(today["lat"].max() - today["lat"].min(),
+                   today["lon"].max() - today["lon"].min())
+        zoom = 4 if span > 12 else 5 if span > 6 else 7 if span > 2 else 8
+        # OpenStreetMap, not CartoDB: Carto's positron tiles now demand an
+        # API key and render "API KEY REQUIRED" watermarks across the map
+        # for anyone without one. OSM's standard tiles are free and need no
+        # key, which is what a public student demo should rely on.
+        fmap = folium.Map(
+            location=centre,
+            zoom_start=zoom,
+            tiles="OpenStreetMap",
+        )
 
         for _, r in today.iterrows():
             colour = (
@@ -205,7 +217,7 @@ with left:
                     f"<b>{r['district']}</b><br>"
                     f"Risk: {r['risk']:.1%}<br>"
                     f"Rainfall: {r['rainfall_mm']:.1f} mm<br>"
-                    f"River: {r['river_discharge_m3s']:.2f} m"
+                    f"Discharge: {r['river_discharge_m3s']:,.0f} m³/s"
                 ),
             ).add_to(fmap)
 
@@ -221,7 +233,7 @@ with right:
         today[["district", "risk", "rainfall_mm", "river_discharge_m3s", "alert"]]
         .rename(columns={
             "district": "District", "risk": "Risk",
-            "rainfall_mm": "Rain (mm)", "river_discharge_m3s": "River (m)",
+            "rainfall_mm": "Rain (mm)", "river_discharge_m3s": "Discharge (m³/s)",
             "alert": "Alert",
         }),
         hide_index=True,
