@@ -50,6 +50,16 @@ data:
   processed: data/processed/dataset.parquet
 
 features:
+  # TARGET DEFINITION — the single most consequential setting here.
+  #   onset_window : does a flood BEGIN within target_window days?
+  #   ongoing      : is a flood in progress at t+horizon?
+  # Use onset_window. DFO changed how long it keeps events open (20.0 days
+  # average in 2000-2014 vs 8.6 days in 2017-2023, with the same number of
+  # events per year), so "ongoing" trains and tests on different
+  # conventions. Onset is a fact about the world; duration is bookkeeping.
+  target_mode: onset_window
+  target_window: 7
+
   # Lag windows in days for rainfall and river level
   lags: [1, 2, 3, 5, 7]
   rolling_windows: [3, 7, 14, 30]

@@ -38,6 +38,10 @@ ID_COLS = ["district", "date"]
 NON_FEATURES = {
     "flood_occurred", TARGET, "district", "date", "lat", "lon",
     "rainfall_mm_was_missing", "river_discharge_m3s_was_missing",
+    # basin/state are kept as columns for grouping and reporting; basin
+    # enters the model only through its one-hot dummies, and raw district
+    # identity never does.
+    "basin", "state", "_onset",
 }
 
 
@@ -126,6 +130,89 @@ def _add_seasonality(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _add_relative_intensity(df: pd.DataFrame, train_end: pd.Timestamp) -> pd.DataFrame:
+    """Where does today sit in THIS district's own historical distribution?
+
+    The single biggest weakness of the raw features: discharge is measured
+    in m3/s and varies by two orders of magnitude between the Brahmaputra
+    and a Konkan stream. 800 m3/s is a drought in Dibrugarh and a disaster
+    in Sangli. A model fed raw magnitudes has to learn that mapping through
+    the terrain features, and it does it badly.
+
+    So we add percentile ranks computed against each district's own record.
+    The reference distribution is the TRAINING PERIOD ONLY — ranking against
+    the full record would let the test years inform their own percentile and
+    leak the future into the present.
+    """
+    df = df.sort_values(ID_COLS).copy()
+    ref = df[df["date"] <= train_end]
+
+    for col in ("rainfall_mm", "river_discharge_m3s", "antecedent_rain_mm"):
+        if col not in df.columns:
+            continue
+        out = np.full(len(df), np.nan)
+        for district, idx in df.groupby("district").groups.items():
+            sample = np.sort(ref.loc[ref["district"] == district, col].dropna().to_numpy())
+            if sample.size < 50:
+                continue
+            values = df.loc[idx, col].to_numpy(dtype=float)
+            # searchsorted gives the rank of each value within the training
+            # distribution; divide by n to get a percentile in [0, 1].
+            ranks = np.searchsorted(sample, values, side="right") / sample.size
+            out[df.index.get_indexer(idx)] = ranks
+        df[f"{col}_pctile"] = out
+
+    return df
+
+
+def _add_basin_context(df: pd.DataFrame) -> pd.DataFrame:
+    """What is happening elsewhere in the same river basin today?
+
+    Floods propagate. Rain falling on upper Assam today is the Brahmaputra's
+    problem downstream tomorrow, and a district-only view cannot see that
+    coming. Basin-wide aggregates are a cheap proxy for upstream state
+    without building an actual routing model.
+
+    Computed per (basin, date) across districts, then each district's own
+    contribution is left in — these are context, not leakage: every value
+    comes from the SAME day's observations, which are available at
+    prediction time, and the target is strictly in the future.
+    """
+    if "basin" not in df.columns:
+        return df
+
+    for col in ("rainfall_mm", "river_discharge_m3s"):
+        if col not in df.columns:
+            continue
+        grp = df.groupby(["basin", "date"])[col]
+        df[f"basin_{col}_mean"] = grp.transform("mean")
+        df[f"basin_{col}_max"] = grp.transform("max")
+        # How extreme is this district relative to its basin today?
+        df[f"{col}_vs_basin"] = df[col] / (df[f"basin_{col}_mean"] + 1e-6)
+
+    if "antecedent_rain_mm" in df.columns:
+        df["basin_antecedent_mean"] = (
+            df.groupby(["basin", "date"])["antecedent_rain_mm"].transform("mean")
+        )
+    return df
+
+
+def _add_region_dummies(df: pd.DataFrame) -> pd.DataFrame:
+    """One-hot the river basin.
+
+    The Brahmaputra floods every monsoon; the Ghaggar almost never does.
+    Without a regime marker the model has to infer that from terrain alone,
+    which it does badly. Basin is coarse enough (12 values) not to let the
+    model memorise individual districts — that would be district-identity
+    leakage dressed up as a feature, and it would collapse the moment you
+    pointed the system at a district it had never seen.
+    """
+    if "basin" not in df.columns:
+        return df
+    dummies = pd.get_dummies(df["basin"], prefix="basin").astype(int)
+    return pd.concat([df, dummies], axis=1)
+
+
 def _add_terrain_interactions(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # Physically motivated: the same rainfall is more dangerous on flat,
@@ -136,13 +223,60 @@ def _add_terrain_interactions(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _add_target(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
-    """Target = flood at t + horizon. Shift is per district, negative = future."""
+def _add_target(df: pd.DataFrame, horizon: int,
+                mode: str = "onset_window", window: int = 7) -> pd.DataFrame:
+    """Build the prediction target.
+
+    TWO MODES, AND THE CHOICE MATTERS MORE THAN ANY MODEL HYPERPARAMETER.
+
+    "ongoing"      flood_occurred at t + horizon. The obvious target, and
+                   the one that quietly broke our evaluation. DFO's records
+                   changed convention over time: events in 2000-2014 average
+                   20.0 days long, events in 2017-2023 average 8.6 days.
+                   Same number of events per year, same polygon sizes —
+                   only the duration bookkeeping changed. Training on
+                   "ongoing" therefore learns 20-day floods and is tested on
+                   8.6-day floods, which is why the positive rate collapsed
+                   from 7.16% (train) to 1.45% (test). That is a labelling
+                   artefact masquerading as a hard problem.
+
+    "onset_window" does a flood BEGIN in the next `window` days? A flood's
+                   start date is a fact about the world; how long DFO chose
+                   to keep the event open is bookkeeping. This target is
+                   therefore far more stable across the record, and it is
+                   also the operationally useful question — you want warning
+                   BEFORE the water arrives, not confirmation that it is
+                   still there on day twelve.
+
+    Onset is defined per district as a 1 whose previous day was 0, so a
+    continuing flood does not keep re-triggering.
+    """
     df = df.sort_values(ID_COLS).copy()
-    df[TARGET] = (
-        df.groupby("district", group_keys=False)["flood_occurred"].shift(-horizon)
-    )
-    return df
+    g = df.groupby("district", group_keys=False)
+
+    if mode == "ongoing":
+        df[TARGET] = g["flood_occurred"].shift(-horizon)
+        return df
+
+    if mode != "onset_window":
+        raise ValueError(f"Unknown target mode {mode!r}")
+
+    prev = g["flood_occurred"].shift(1).fillna(0)
+    df["_onset"] = ((df["flood_occurred"] == 1) & (prev == 0)).astype(int)
+
+    # Does an onset occur in [t+horizon, t+horizon+window-1]?
+    # Reverse the series, take a trailing rolling max, reverse back — that
+    # is a forward-looking window without a Python loop.
+    def forward_any(s: pd.Series) -> pd.Series:
+        return (
+            s[::-1]
+            .shift(horizon)
+            .rolling(window, min_periods=1)
+            .max()[::-1]
+        )
+
+    df[TARGET] = df.groupby("district", group_keys=False)["_onset"].apply(forward_any)
+    return df.drop(columns=["_onset"])
 
 
 # ----------------------------------------------------------------------
@@ -177,7 +311,9 @@ def feature_columns(df: pd.DataFrame) -> list[str]:
 # Entry point
 # ----------------------------------------------------------------------
 
-def build(horizon: int = 1, save: bool = True) -> tuple[pd.DataFrame, list[str]]:
+def build(horizon: int = 1, save: bool = True,
+          target_mode: str | None = None,
+          target_window: int | None = None) -> tuple[pd.DataFrame, list[str]]:
     path = ROOT / CFG.data.processed
     if not path.exists():
         raise FileNotFoundError(
@@ -192,8 +328,13 @@ def build(horizon: int = 1, save: bool = True) -> tuple[pd.DataFrame, list[str]]
     df = _lag_and_roll(raw)
     df = _add_departure(df, clim)
     df = _add_seasonality(df)
+    df = _add_basin_context(df)
+    df = _add_relative_intensity(df, pd.Timestamp(CFG.split.train_end))
+    df = _add_region_dummies(df)
     df = _add_terrain_interactions(df)
-    df = _add_target(df, horizon)
+    target_mode = target_mode or getattr(CFG.features, "target_mode", "onset_window")
+    target_window = target_window or int(getattr(CFG.features, "target_window", 7))
+    df = _add_target(df, horizon, mode=target_mode, window=target_window)
 
     # Rows at the start of each district's series (no lag history) and at
     # the very end (no future label) are unusable.
@@ -213,7 +354,11 @@ def build(horizon: int = 1, save: bool = True) -> tuple[pd.DataFrame, list[str]]
 
     print(f"[features] {len(feats)} features, {len(df):,} usable rows "
           f"({before - len(df):,} dropped for insufficient history)")
-    print(f"[features] horizon = {horizon} day(s) ahead")
+    if target_mode == "onset_window":
+        print(f"[features] target = flood ONSET within {target_window}d, "
+              f"starting t+{horizon}")
+    else:
+        print(f"[features] target = flood ongoing at t+{horizon}")
     print(f"[features] positive rate at t+{horizon}: {df[TARGET].mean():.2%}")
 
     if save:
@@ -228,5 +373,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", type=int, default=1,
                     help="predict flood this many days ahead")
+    ap.add_argument("--target-mode", default=None,
+                    choices=["onset_window", "ongoing"])
+    ap.add_argument("--target-window", type=int, default=None)
     args = ap.parse_args()
-    build(horizon=args.horizon)
+    build(horizon=args.horizon, target_mode=args.target_mode,
+          target_window=args.target_window)
