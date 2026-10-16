@@ -135,6 +135,22 @@ if CFG.data.source == "fixture":
         icon="⚠️",
     )
 
+# Guard against a schema mismatch surviving a redeploy. The bootstrap
+# fingerprint should prevent this, but a raw KeyError three screens down is
+# a terrible way to find out it did not.
+REQUIRED = ["district", "date", "risk", "rainfall_mm", "river_discharge_m3s",
+            "lat", "lon"]
+missing_cols = [c for c in REQUIRED if c not in data.columns]
+if missing_cols:
+    st.error(
+        f"The cached data is from an older version of the pipeline — it is "
+        f"missing: `{'`, `'.join(missing_cols)}`.\n\n"
+        f"Delete `data/processed/` and `outputs/models/` and reload, or "
+        f"redeploy so the bootstrap rebuilds them."
+    )
+    st.caption(f"Columns present: {', '.join(sorted(data.columns))}")
+    st.stop()
+
 threshold = alert_threshold(MODEL_NAME, HORIZON)
 
 # ---- sidebar: the replay control -------------------------------------

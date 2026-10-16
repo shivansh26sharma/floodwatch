@@ -15,9 +15,63 @@ This is also why the fixture is committed while data/processed is not:
 the fixture is the *seed* that makes a fresh clone self-healing.
 """
 
+import hashlib
+import json
 from pathlib import Path
 
 from src.config import CFG, ROOT
+
+
+def build_fingerprint() -> str:
+    """A hash of every config choice that changes the SHAPE of the artifacts.
+
+    Existence is not freshness. A deploy that already has
+    features_h1.parquet from a previous version will happily reuse it even
+    though a column was renamed underneath it — which is exactly how the
+    hosted dashboard ended up raising KeyError on river_discharge_m3s while
+    holding a parquet that still said river_level_m.
+
+    So we stamp the build with a fingerprint and rebuild when it moves.
+    Anything that alters column names, the district set, the date range or
+    the target definition belongs in here.
+    """
+    parts = {
+        "districts": sorted(CFG.project.districts) if isinstance(
+            CFG.project.districts, list) else str(CFG.project.districts),
+        "start": str(CFG.project.start_date),
+        "end": str(CFG.project.end_date),
+        "source": str(CFG.data.source),
+        "target_mode": str(getattr(CFG.features, "target_mode", "onset_window")),
+        "target_window": int(getattr(CFG.features, "target_window", 7)),
+        "train_end": str(CFG.split.train_end),
+        "val_end": str(CFG.split.val_end),
+        # Schema version — bump by hand after any column rename.
+        "schema": 2,
+    }
+    blob = json.dumps(parts, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _manifest_path() -> Path:
+    return ROOT / "data/processed/build_manifest.json"
+
+
+def _stored_fingerprint() -> str | None:
+    path = _manifest_path()
+    if not path.exists():
+        return None
+    try:
+        with open(path) as fh:
+            return json.load(fh).get("fingerprint")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_fingerprint() -> None:
+    path = _manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump({"fingerprint": build_fingerprint()}, fh, indent=2)
 
 
 def artifact_status(horizon: int = 1) -> dict[str, bool]:
@@ -31,12 +85,22 @@ def artifact_status(horizon: int = 1) -> dict[str, bool]:
 
 
 def ensure_artifacts(horizon: int = 1, verbose: bool = True) -> dict[str, bool]:
-    """Build anything missing. Safe to call repeatedly."""
+    """Build anything missing OR stale. Safe to call repeatedly."""
     status = artifact_status(horizon)
 
     def log(msg: str) -> None:
         if verbose:
             print(f"[bootstrap] {msg}")
+
+    # Stale artifacts are worse than missing ones: they load cleanly and
+    # then explode somewhere far away. If the fingerprint moved, treat
+    # everything derived as absent.
+    want, have = build_fingerprint(), _stored_fingerprint()
+    if have != want:
+        if have is not None:
+            log(f"config changed ({have} -> {want}) — rebuilding derived artifacts")
+        for key in ("dataset", "features", "model", "summary"):
+            status[key] = False
 
     if not status["fixture"]:
         if CFG.data.source == "real":
@@ -65,6 +129,7 @@ def ensure_artifacts(horizon: int = 1, verbose: bool = True) -> dict[str, bool]:
         from src.models.evaluate import run as evaluate_run
         evaluate_run(horizon=horizon)
 
+    _write_fingerprint()
     final = artifact_status(horizon)
     log("ready" if all(final.values()) else f"incomplete: {final}")
     return final
