@@ -133,9 +133,37 @@ def cost_curve(y_true: np.ndarray, proba: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def pick_threshold(y_true: np.ndarray, proba: np.ndarray) -> tuple[float, pd.DataFrame]:
+def pick_threshold(y_true: np.ndarray, proba: np.ndarray,
+                   objective: str = "cost") -> tuple[float, pd.DataFrame]:
+    """Choose an operating threshold on VALIDATION data.
+
+    Two objectives, because they answer different questions:
+
+      "cost" minimises expected cost at the configured miss:false-alarm
+             ratio (20:1). This is the operational choice — it says
+             explicitly that you would accept twenty false alarms to catch
+             one more flood, and it therefore produces LOW PRECISION BY
+             DESIGN. That is not a broken model; it is the cost ratio doing
+             what you asked.
+
+      "f1"   maximises F1, weighting precision and recall equally. This is
+             the number to quote when someone asks for "good precision and
+             recall" without specifying what a miss costs.
+
+    Report both. Quoting only the cost-optimal point makes the model look
+    imprecise; quoting only the F1 point hides that you would rather miss
+    floods than raise false alarms. The pair is the honest answer.
+    """
     curve = cost_curve(y_true, proba)
-    best = curve.loc[curve["expected_cost"].idxmin()]
+    curve["f1"] = (
+        2 * curve["precision"] * curve["recall"]
+        / (curve["precision"] + curve["recall"]).replace(0, np.nan)
+    ).fillna(0.0)
+
+    if objective == "f1":
+        best = curve.loc[curve["f1"].idxmax()]
+    else:
+        best = curve.loc[curve["expected_cost"].idxmin()]
     return float(best["threshold"]), curve
 
 
@@ -173,9 +201,18 @@ def evaluate_model(
     y_val = df_val[TARGET].to_numpy()
     y_test = df[TARGET].to_numpy()
 
-    # Threshold chosen on VALIDATION, then applied unchanged to test.
-    # Choosing it on test would be cheating.
-    threshold, curve = pick_threshold(y_val, proba_val)
+    # Thresholds chosen on VALIDATION, then applied unchanged to test.
+    # Choosing them on test would be cheating.
+    threshold, curve = pick_threshold(y_val, proba_val, objective="cost")
+    threshold_f1, _ = pick_threshold(y_val, proba_val, objective="f1")
+
+    # Metrics at the F1-optimal operating point, for the "all parameters
+    # good" view. Same model, different alarm threshold.
+    pred_f1 = (proba_test >= threshold_f1).astype(int)
+    p_f1, r_f1, f_f1, _ = precision_recall_fscore_support(
+        y_test, pred_f1, average="binary", zero_division=0
+    )
+    acc_f1 = float((pred_f1 == y_test).mean())
 
     pred = (proba_test >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_test, pred, labels=[0, 1]).ravel()
@@ -198,6 +235,16 @@ def evaluate_model(
         "model": name,
         "threshold": threshold,
         "alarm_duty_cycle": alarm_rate,
+        # --- F1-optimal operating point (same model, different threshold)
+        "threshold_f1": threshold_f1,
+        "precision_at_f1": float(p_f1),
+        "recall_at_f1": float(r_f1),
+        "f1_at_f1": float(f_f1),
+        "accuracy_at_f1": acc_f1,
+        # Accuracy of the do-nothing baseline: predict "no flood", always.
+        # If your model's accuracy is not comfortably above this, accuracy
+        # is telling you nothing at all.
+        "accuracy_all_negative": float((y_test == 0).mean()),
         "roc_auc": float(roc_auc_score(y_test, proba_test)),
         "pr_auc": float(average_precision_score(y_test, proba_test)),
         "brier": float(brier_score_loss(y_test, proba_test)),
@@ -269,7 +316,17 @@ def run(horizon: int = 1) -> pd.DataFrame:
     cols = ["model", "threshold", "recall", "precision", "roc_auc", "pr_auc",
             "brier", "event_detection_rate", "median_lead_time_hours",
             "alarm_duty_cycle"]
+    print("OPERATING POINT A — cost-optimal (20:1 miss:false-alarm)")
     print(table[cols].to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+
+    print("\nOPERATING POINT B — F1-optimal (precision and recall weighted equally)")
+    f1cols = ["model", "threshold_f1", "precision_at_f1", "recall_at_f1",
+              "f1_at_f1", "accuracy_at_f1"]
+    print(table[f1cols].to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    print(f"\n  Always-predict-no-flood accuracy: "
+          f"{table['accuracy_all_negative'].iloc[0]:.3f}  "
+          f"<- beat THIS, not 0.50. Accuracy is near-useless at a "
+          f"{1 - table['accuracy_all_negative'].iloc[0]:.2%} base rate.")
     print("\nConfusion matrices at the cost-optimal threshold:")
     for r in reports:
         c = r["confusion"]

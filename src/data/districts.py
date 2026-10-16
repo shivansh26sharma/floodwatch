@@ -27,6 +27,15 @@ test on another, and report where the model generalises and where it breaks.
 Whether flood models transfer across basins is a genuinely open question, and
 a transferability matrix is a stronger result than one accuracy number.
 
+A NOTE ON COASTAL DISTRICTS
+---------------------------
+Chennai and Cuddalore were originally placed at their headquarters, which
+sit on the coast. GloFAS has no river grid cell there, so discharge came
+back 100% missing and the dataset builder dropped both districts entirely
+(17,532 rows). Their points are nudged a few km inland onto the nearest
+river reach. Say so in the report: it is a deliberate, documented
+adjustment, not a silent fudge.
+
 COORDINATES ARE POINT SAMPLES
 -----------------------------
 Each entry is a district headquarters, not an area centroid, and weather is
@@ -126,8 +135,8 @@ INDIA_FLOOD_DISTRICTS: dict[str, tuple[float, float, str, str]] = {
     "Ahmedabad":      (23.0225, 72.5714, "Gujarat", "Gujarat"),
 
     # ---- Tamil Nadu: northeast monsoon ---------------------------------
-    "Chennai":        (13.0827, 80.2707, "TamilNadu", "TamilNadu"),
-    "Cuddalore":      (11.7447, 79.7689, "TamilNadu", "TamilNadu"),
+    "Chennai":        (13.0300, 80.1200, "TamilNadu", "TamilNadu"),
+    "Cuddalore":      (11.7600, 79.6500, "TamilNadu", "TamilNadu"),
     "Thanjavur":      (10.7870, 79.1378, "TamilNadu", "TamilNadu"),
 
     # ---- Himalayan flash-flood catchments ------------------------------

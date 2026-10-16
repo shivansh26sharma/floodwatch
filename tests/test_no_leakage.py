@@ -48,18 +48,26 @@ def test_no_overlapping_district_days_across_splits(features):
     assert not keys["train"] & keys["test"]
 
 
-def test_target_is_strictly_future(features):
-    """The target at date t must equal the raw label at t+horizon."""
+def test_ongoing_target_is_strictly_the_next_day(features):
+    """The "ongoing" target at t must equal the raw label at t+horizon.
+
+    The default target mode is onset_window, so this builds the "ongoing"
+    target explicitly rather than reading the parquet — that path still
+    exists and still has to be correct.
+    """
+    from src.features.build_features import _add_target
+
     raw_path = Path(__file__).resolve().parents[1] / CFG.data.processed
     raw = pd.read_parquet(raw_path)[["district", "date", "flood_occurred"]]
+    built = _add_target(raw.copy(), horizon=1, mode="ongoing")
 
-    merged = features[["district", "date", TARGET]].merge(
+    merged = built[["district", "date", TARGET]].merge(
         raw.assign(date=raw["date"] - pd.Timedelta(days=1)),
         on=["district", "date"], how="inner",
     )
     assert len(merged) > 0
     assert (merged[TARGET] == merged["flood_occurred"]).all(), (
-        "Target is not the next day's label — the horizon shift is wrong."
+        "ongoing target is not the next day's label — the horizon shift is wrong."
     )
 
 
@@ -105,3 +113,49 @@ def test_no_rolling_feature_uses_the_current_day(features):
     # They must differ on at least some rows; identical means the window
     # is including the current day.
     assert (inclusive.values[5:] != exclusive.values[5:]).any()
+
+
+def test_onset_target_looks_forward_only(features):
+    """The onset-window target must be built from FUTURE onsets only.
+
+    A target that accidentally includes today's onset would hand the model
+    the answer. Rebuild the target by brute force on one district and
+    compare against what the vectorised forward-window produced.
+    """
+    import numpy as np
+    from src.features.build_features import _add_target
+
+    raw_path = Path(__file__).resolve().parents[1] / CFG.data.processed
+    raw = pd.read_parquet(raw_path)[["district", "date", "flood_occurred"]]
+
+    horizon, window = 1, int(getattr(CFG.features, "target_window", 7))
+    built = _add_target(raw.copy(), horizon, mode="onset_window", window=window)
+
+    d = built["district"].iloc[0]
+    one = built[built["district"] == d].sort_values("date").reset_index(drop=True)
+    flood = one["flood_occurred"].to_numpy()
+    onset = np.zeros(len(flood), dtype=int)
+    onset[0] = flood[0]
+    onset[1:] = ((flood[1:] == 1) & (flood[:-1] == 0)).astype(int)
+
+    expected = np.zeros(len(flood))
+    for i in range(len(flood)):
+        lo, hi = i + horizon, i + horizon + window
+        seg = onset[lo:hi]
+        expected[i] = seg.max() if len(seg) else np.nan
+
+    got = one[TARGET].to_numpy(dtype=float)
+    valid = ~np.isnan(expected) & ~np.isnan(got)
+    assert valid.sum() > 100
+    assert (expected[valid] == got[valid]).all(), (
+        "onset-window target does not match a brute-force forward window"
+    )
+
+
+def test_district_identity_is_never_a_feature(features):
+    """Basin may enter as a dummy; raw district identity must not."""
+    from src.features.build_features import feature_columns
+    feats = feature_columns(features)
+    assert "district" not in feats
+    assert not any(f.startswith("district_") for f in feats)
+    assert "lat" not in feats and "lon" not in feats
