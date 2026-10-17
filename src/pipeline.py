@@ -22,6 +22,14 @@ from pathlib import Path
 from src.config import CFG, ROOT
 
 
+def _effective_source_for_fingerprint() -> str:
+    try:
+        from src.data.loaders import effective_source
+        return effective_source()
+    except Exception:  # noqa: BLE001
+        return str(CFG.data.source)
+
+
 def build_fingerprint() -> str:
     """A hash of every config choice that changes the SHAPE of the artifacts.
 
@@ -40,7 +48,10 @@ def build_fingerprint() -> str:
             CFG.project.districts, list) else str(CFG.project.districts),
         "start": str(CFG.project.start_date),
         "end": str(CFG.project.end_date),
-        "source": str(CFG.data.source),
+        # The EFFECTIVE source, not the configured one — a deploy that
+        # falls back to the fixture must not reuse artifacts built from
+        # real data, or vice versa.
+        "source": _effective_source_for_fingerprint(),
         "target_mode": str(getattr(CFG.features, "target_mode", "onset_window")),
         "target_window": int(getattr(CFG.features, "target_window", 7)),
         "train_end": str(CFG.split.train_end),
@@ -103,11 +114,9 @@ def ensure_artifacts(horizon: int = 1, verbose: bool = True) -> dict[str, bool]:
             status[key] = False
 
     if not status["fixture"]:
-        if CFG.data.source == "real":
-            raise RuntimeError(
-                "config says data.source=real but no real data is present. "
-                "Place the downloads in data/raw/ and implement the loaders."
-            )
+        # The fixture is always generated, even when config asks for real
+        # data: it is the fallback the loaders need if the real files turn
+        # out to be absent (gitignored on a deploy, say).
         log("generating fixture")
         from src.data.make_fixture import write
         write()

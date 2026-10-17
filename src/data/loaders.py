@@ -27,6 +27,8 @@ import pandas as pd
 
 from src.config import CFG, ROOT
 
+_warned: dict[str, bool] = {}
+
 CANONICAL = {
     "rainfall": ["date", "district", "rainfall_mm"],
     "river": ["date", "district", "river_discharge_m3s"],
@@ -285,13 +287,16 @@ def load(name: str) -> pd.DataFrame:
     if name not in CANONICAL:
         raise KeyError(f"Unknown table {name!r}. Expected one of {list(CANONICAL)}")
 
-    source = CFG.data.source
+    source = effective_source()
     if source == "fixture":
+        if CFG.data.source == "real" and not _warned.get("fallback"):
+            _warned["fallback"] = True
+            print(f"[loaders] {fallback_reason()}")
+            print("[loaders] FALLING BACK TO THE SYNTHETIC FIXTURE — "
+                  "nothing below is real.")
         df = _load_fixture(name)
-    elif source == "real":
-        df = _REAL[name]()
     else:
-        raise ValueError(f"config data.source must be 'fixture' or 'real', got {source!r}")
+        df = _REAL[name]()
 
     missing = set(CANONICAL[name]) - set(df.columns)
     if missing:
@@ -305,6 +310,53 @@ def load_all() -> dict[str, pd.DataFrame]:
     return {name: load(name) for name in CANONICAL}
 
 
+# ----------------------------------------------------------------------
+# Effective source: what we can ACTUALLY load right now
+# ----------------------------------------------------------------------
+# config.yaml says what you WANT. This says what is present. They differ
+# in one important case: the repo is deployed with data.source: real, but
+# data/raw/ is gitignored, so the hosted app has the config and none of
+# the files. Crashing there is useless — the demo should still run, just
+# visibly on the fixture.
+#
+# The fallback is loud, never silent: effective_source() reports it,
+# is_fixture() returns True, every pipeline stage prints the fixture
+# warning, and the dashboard banner says real data was expected and not
+# found. A quiet fallback would be far worse than a crash, because the
+# numbers would look real.
+
+REAL_TABLES = ("rainfall", "river", "terrain", "labels")
+
+
+def _missing_real_files() -> list[str]:
+    missing = []
+    for name in REAL_TABLES:
+        configured = getattr(CFG.data.real, name, None)
+        if configured and not (ROOT / configured).exists():
+            missing.append(str(configured))
+    return missing
+
+
+def effective_source() -> str:
+    """'real' only if real data is genuinely on disk; otherwise 'fixture'."""
+    if CFG.data.source != "real":
+        return "fixture"
+    return "fixture" if _missing_real_files() else "real"
+
+
+def fallback_reason() -> str | None:
+    """Why we fell back, if we did — for the dashboard banner and logs."""
+    if CFG.data.source != "real":
+        return None
+    missing = _missing_real_files()
+    if not missing:
+        return None
+    return (
+        "config.yaml requests real data but these files are not present: "
+        + ", ".join(missing)
+    )
+
+
 def is_fixture() -> bool:
     """True when running on synthetic data. Used to stamp warnings on outputs."""
-    return CFG.data.source == "fixture"
+    return effective_source() == "fixture"

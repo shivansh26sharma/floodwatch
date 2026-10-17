@@ -29,7 +29,7 @@ project:
 data:
   # "fixture" = synthetic data for pipeline testing ONLY.
   # "real"    = the actual downloaded datasets.
-  source: real
+  source: fixture
 
   fixture:
     path: data/fixtures
