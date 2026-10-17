@@ -86,9 +86,15 @@ def _write_fingerprint() -> None:
 
 
 def artifact_status(horizon: int = 1) -> dict[str, bool]:
+    def _dataset_present() -> bool:
+        if _effective_source_for_fingerprint() == "precomputed":
+            from src.data.loaders import precomputed_file
+            return precomputed_file().exists()
+        return (ROOT / CFG.data.processed).exists()
+
     return {
         "fixture": (ROOT / CFG.data.fixture.path / "rainfall.csv").exists(),
-        "dataset": (ROOT / CFG.data.processed).exists(),
+        "dataset": _dataset_present(),
         "features": (ROOT / "data/processed" / f"features_h{horizon}.parquet").exists(),
         "model": (ROOT / CFG.outputs.models / f"risk_random_forest_h{horizon}.pkl").exists(),
         "summary": (ROOT / CFG.outputs.reports / f"summary_h{horizon}.json").exists(),
@@ -110,13 +116,16 @@ def ensure_artifacts(horizon: int = 1, verbose: bool = True) -> dict[str, bool]:
     if have != want:
         if have is not None:
             log(f"config changed ({have} -> {want}) — rebuilding derived artifacts")
-        # The FIXTURE is invalidated too. It is committed to the repo, so a
-        # schema change (a renamed or added column) leaves a stale copy on
-        # every deploy until someone remembers to regenerate and commit it
-        # — which is exactly how the hosted app ended up rejecting its own
-        # fixture for missing 'basin' and 'state'. Regenerating is cheap and
-        # deterministic (fixed seed), so just always do it.
-        for key in ("fixture", "dataset", "features", "model", "summary"):
+        # The fixture is invalidated too: it is COMMITTED, so a schema change
+        # leaves a stale copy on every deploy. Regenerating it is cheap and
+        # deterministic (fixed seed).
+        derived = ["fixture", "dataset", "features", "model", "summary"]
+        if _effective_source_for_fingerprint() == "precomputed":
+            # Here the dataset is committed INPUT, not something we derive —
+            # rebuilding it would need the raw files, which a deploy has not
+            # got. Everything downstream still rebuilds.
+            derived = ["features", "model", "summary"]
+        for key in derived:
             status[key] = False
 
     if not status["fixture"]:
@@ -128,6 +137,13 @@ def ensure_artifacts(horizon: int = 1, verbose: bool = True) -> dict[str, bool]:
         write()
 
     if not status["dataset"]:
+        if _effective_source_for_fingerprint() == "precomputed":
+            from src.data.loaders import precomputed_file
+            raise FileNotFoundError(
+                f"data.source is 'precomputed' but "
+                f"{precomputed_file()} is missing. Commit it, or switch "
+                f"data.source to fixture/real."
+            )
         log("building dataset")
         from src.data.build_dataset import build
         build()

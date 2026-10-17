@@ -18,7 +18,7 @@ project:
   #   [Patna, Dhubri]      an explicit list
   # Nationwide is the default: it gives the DFO archive far more events to
   # label, which is what keeps a training split from ending up empty.
-  districts: all
+  districts: [Alappuzha, Barpeta, Cachar, Dhemaji, Dhubri, Dibrugarh, Ernakulam, Goalpara, Idukki, Jorhat, Kamrup, Kottayam, Lakhimpur, Majuli, Morigaon, Nagaon, Palakkad, Pathanamthitta, Sivasagar, Thrissur, Tinsukia, Wayanad]
 
   # Study period. WIDE ON PURPOSE. Real flood archives record only LARGE
   # events, so a narrow window can leave a split with zero positives and
@@ -27,9 +27,12 @@ project:
   end_date: "2023-12-31"
 
 data:
-  # "fixture" = synthetic data for pipeline testing ONLY.
-  # "real"    = the actual downloaded datasets.
-  source: fixture
+  # "fixture"     = synthetic data for pipeline testing ONLY.
+  # "real"        = the raw ERA5/GloFAS/DFO downloads (local only; the raw
+  #                 files are gitignored).
+  # "precomputed" = the committed joined dataset. REAL data, 2.7MB, so a
+  #                 deploy serves real numbers without the raw sources.
+  source: precomputed
 
   fixture:
     path: data/fixtures
@@ -48,6 +51,12 @@ data:
     labels: data/raw/Global_Flood_Records.gpkg  # DFO GeoPackage (polygons) — see README
 
   processed: data/processed/dataset.parquet
+
+  # Used when source == precomputed. A SCOPED slice of the real dataset,
+  # small enough to commit and to train on a 1GB host. The full
+  # 75-district frame is ~504MB in RAM before training starts, which would
+  # OOM Streamlit's free tier; one basin is a fraction of that.
+  precomputed_path: data/processed/demo_dataset.parquet
 
 features:
   # TARGET DEFINITION — the single most consequential setting here.

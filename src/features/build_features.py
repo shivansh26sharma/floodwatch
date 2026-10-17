@@ -314,7 +314,9 @@ def feature_columns(df: pd.DataFrame) -> list[str]:
 def build(horizon: int = 1, save: bool = True,
           target_mode: str | None = None,
           target_window: int | None = None) -> tuple[pd.DataFrame, list[str]]:
-    path = ROOT / CFG.data.processed
+    from src.data.loaders import effective_source, precomputed_file
+    path = (precomputed_file() if effective_source() == "precomputed"
+            else ROOT / CFG.data.processed)
     if not path.exists():
         raise FileNotFoundError(
             f"{path} missing. Build it first:\n    python -m src.data.build_dataset"
