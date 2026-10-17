@@ -1,10 +1,10 @@
 # SYNTHETIC FIXTURE - NOT REAL DATA - DO NOT REPORT RESULTS FROM THIS
-district,mean_elevation_m,mean_slope_deg,terrain_ruggedness_m,lat,lon
-Alappuzha,697.7,2.14,102.1,11.3357,75.7146
-Ernakulam,397.8,6.53,16.2,9.0591,75.8261
-Idukki,773.4,5.44,149.8,10.1202,76.0739
-Kottayam,629.1,13.0,115.5,8.4708,75.3737
-Pathanamthitta,89.3,9.16,137.7,8.9017,75.2248
-Thrissur,878.2,11.59,67.0,10.9639,76.0893
-Wayanad,686.2,6.43,174.9,11.2046,75.4673
-Palakkad,708.5,3.49,161.3,12.0733,76.5745
+district,mean_elevation_m,mean_slope_deg,terrain_ruggedness_m,lat,lon,state,basin
+Ahmedabad,697.7,2.14,102.1,23.0225,72.5714,Gujarat,Gujarat
+Alappuzha,397.8,6.53,16.2,9.4981,76.3388,Kerala,Kerala
+Bahraich,773.4,5.44,149.8,27.5743,81.5944,UttarPradesh,Ghaghara
+Balasore,629.1,13.0,115.5,21.4942,86.9336,Odisha,Mahanadi
+Ballia,89.3,9.16,137.7,25.76,84.15,UttarPradesh,Ghaghara
+Balrampur,878.2,11.59,67.0,27.43,82.19,UttarPradesh,Ghaghara
+Barpeta,686.2,6.43,174.9,26.322,91.005,Assam,Brahmaputra
+Bhadrak,708.5,3.49,161.3,21.0574,86.516,Odisha,Mahanadi
