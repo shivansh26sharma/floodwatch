@@ -110,7 +110,13 @@ def ensure_artifacts(horizon: int = 1, verbose: bool = True) -> dict[str, bool]:
     if have != want:
         if have is not None:
             log(f"config changed ({have} -> {want}) — rebuilding derived artifacts")
-        for key in ("dataset", "features", "model", "summary"):
+        # The FIXTURE is invalidated too. It is committed to the repo, so a
+        # schema change (a renamed or added column) leaves a stale copy on
+        # every deploy until someone remembers to regenerate and commit it
+        # — which is exactly how the hosted app ended up rejecting its own
+        # fixture for missing 'basin' and 'state'. Regenerating is cheap and
+        # deterministic (fixed seed), so just always do it.
+        for key in ("fixture", "dataset", "features", "model", "summary"):
             status[key] = False
 
     if not status["fixture"]:
