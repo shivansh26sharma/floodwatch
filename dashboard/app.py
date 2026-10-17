@@ -129,7 +129,15 @@ if data.empty:
 
 from src.data import loaders as _loaders  # noqa: E402
 
-if _loaders.is_fixture():
+if _loaders.is_precomputed():
+    st.success(
+        "**Running on real data** — ERA5 rainfall, GloFAS river discharge and "
+        "DFO flood records, 75 districts across 12 river basins, 2000–2023. "
+        "Served from the committed joined dataset; the raw source files stay "
+        "out of the repo. ERA5 and GloFAS are reanalysis, not station gauges.",
+        icon="✅",
+    )
+elif _loaders.is_fixture():
     reason = _loaders.fallback_reason()
     if reason:
         st.error(

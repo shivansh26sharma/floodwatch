@@ -337,15 +337,41 @@ def _missing_real_files() -> list[str]:
     return missing
 
 
+def precomputed_file():
+    """Path to the committed scoped real dataset."""
+    rel = getattr(CFG.data, "precomputed_path", "data/processed/demo_dataset.parquet")
+    return ROOT / rel
+
+
 def effective_source() -> str:
-    """'real' only if real data is genuinely on disk; otherwise 'fixture'."""
-    if CFG.data.source != "real":
+    """What we can actually load right now.
+
+      "real"        the raw ERA5/GloFAS/DFO files are present
+      "precomputed" the joined district-day table is committed to the repo.
+                    This is REAL data — the raw sources were processed once
+                    on a machine that had them, and the 2.7MB result was
+                    committed so a deploy can serve real numbers without
+                    the ~32MB of source files (which stay gitignored).
+      "fixture"     synthetic; nothing below it is real
+    """
+    configured = CFG.data.source
+
+    if configured == "precomputed":
+        return "precomputed" if precomputed_file().exists() else "fixture"
+
+    if configured != "real":
         return "fixture"
+
     return "fixture" if _missing_real_files() else "real"
 
 
 def fallback_reason() -> str | None:
     """Why we fell back, if we did — for the dashboard banner and logs."""
+    if CFG.data.source == "precomputed" and effective_source() == "fixture":
+        return (
+            "config.yaml requests the precomputed real dataset but "
+            f"{precomputed_file().name} is not present"
+        )
     if CFG.data.source != "real":
         return None
     missing = _missing_real_files()
@@ -360,3 +386,8 @@ def fallback_reason() -> str | None:
 def is_fixture() -> bool:
     """True when running on synthetic data. Used to stamp warnings on outputs."""
     return effective_source() == "fixture"
+
+
+def is_precomputed() -> bool:
+    """Real data, loaded from the committed joined table rather than raw files."""
+    return effective_source() == "precomputed"
