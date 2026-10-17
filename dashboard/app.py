@@ -127,13 +127,26 @@ if data.empty:
     )
     st.stop()
 
-if CFG.data.source == "fixture":
-    st.warning(
-        "**Running on the synthetic test fixture.** Every number on this page "
-        "is fake and exists only to prove the pipeline works. Set "
-        "`data.source: real` in `config.yaml` and provide the ERA5/GloFAS downloads plus the DFO GeoPackage.",
-        icon="⚠️",
-    )
+from src.data import loaders as _loaders  # noqa: E402
+
+if _loaders.is_fixture():
+    reason = _loaders.fallback_reason()
+    if reason:
+        st.error(
+            f"**Real data was requested but is not available here.** {reason}\n\n"
+            f"`data/raw/` is gitignored, so a deployed copy of this repo has "
+            f"the config but none of the files. **The page below is running "
+            f"on the synthetic fixture — every number on it is fake.**",
+            icon="🚨",
+        )
+    else:
+        st.warning(
+            "**Running on the synthetic test fixture.** Every number on this "
+            "page is fake and exists only to prove the pipeline works. Set "
+            "`data.source: real` in `config.yaml` and provide the ERA5/GloFAS "
+            "downloads plus the DFO GeoPackage.",
+            icon="⚠️",
+        )
 
 # Guard against a schema mismatch surviving a redeploy. The bootstrap
 # fingerprint should prevent this, but a raw KeyError three screens down is
