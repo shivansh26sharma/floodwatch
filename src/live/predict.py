@@ -46,6 +46,9 @@ import pandas as pd
 from src.config import CFG, ROOT
 from src.features.reference import FeatureReference
 
+TERRAIN_COLUMNS = ["district", "mean_elevation_m", "mean_slope_deg",
+                   "terrain_ruggedness_m", "lat", "lon"]
+
 
 def _load_model(name: str, horizon: int):
     path = ROOT / CFG.outputs.models / f"risk_{name}_h{horizon}.pkl"
@@ -70,6 +73,10 @@ def _alert_threshold(name: str, horizon: int) -> float:
     return 0.5
 
 
+def risk_path() -> Path:
+    return ROOT / "data/live/risk.csv"
+
+
 def load_conditions() -> pd.DataFrame:
     path = ROOT / "data/live/conditions.csv"
     if not path.exists():
@@ -78,7 +85,52 @@ def load_conditions() -> pd.DataFrame:
             f"    python -m src.live.fetch"
         )
     df = pd.read_csv(path, parse_dates=["date"])
+    df["is_forecast"] = df["is_forecast"].astype(bool)
     return df.sort_values(["district", "date"]).reset_index(drop=True)
+
+
+def terrain_table(names: list[str], prefer_raw: bool = True) -> pd.DataFrame:
+    """Static terrain features for the study districts.
+
+    Elevation, slope and ruggedness never change, so there is no reason to
+    refetch them on every scoring run. Prefer the raw download; fall back
+    to the committed joined dataset, which carries the same columns.
+
+    The fallback is what makes live scoring work on a DEPLOY: `data/raw/`
+    is gitignored, so a hosted copy of this repo has the model and the
+    joined dataset but none of the raw source files. Without the fallback
+    the live tab would raise FileNotFoundError on a fresh deploy and the
+    whole forward-looking half of the project would be local-only.
+
+    `prefer_raw=False` forces the fallback, so a test can prove the deploy
+    path works without having to hide the raw file first.
+    """
+    wanted = set(names)
+    raw = ROOT / CFG.data.real.terrain
+    if prefer_raw and raw.exists():
+        table = pd.read_csv(raw)
+        if set(TERRAIN_COLUMNS).issubset(table.columns):
+            table = table[TERRAIN_COLUMNS].drop_duplicates("district")
+            return table[table["district"].isin(wanted)].reset_index(drop=True)
+
+    from src.data import loaders
+
+    joined = loaders.precomputed_file()
+    if joined.exists():
+        table = pd.read_parquet(joined)
+        if set(TERRAIN_COLUMNS).issubset(table.columns):
+            table = (table[TERRAIN_COLUMNS]
+                     .dropna(subset=["district"])
+                     .groupby("district", as_index=False)
+                     .first())
+            return table[table["district"].isin(wanted)].reset_index(drop=True)
+
+    raise FileNotFoundError(
+        f"Terrain features are needed for live scoring (elevation, slope and "
+        f"ruggedness are model inputs) and neither source is present:\n"
+        f"  {raw}\n  {joined}\n"
+        f"Run `python -m src.data.download`, or commit the joined dataset."
+    )
 
 
 def build_live_features(conditions: pd.DataFrame,
@@ -92,23 +144,10 @@ def build_live_features(conditions: pd.DataFrame,
     from src.features import build_features as bf
 
     df = conditions.copy()
+    names = sorted(df["district"].unique())
 
-    # Terrain is static; attach it from the district table rather than
-    # refetching elevation on every scoring run.
-    meta = dref.meta(sorted(df["district"].unique()))
-    terrain_path = ROOT / CFG.data.real.terrain
-    if terrain_path.exists():
-        terrain = pd.read_csv(terrain_path)
-        keep = ["district", "mean_elevation_m", "mean_slope_deg",
-                "terrain_ruggedness_m", "lat", "lon"]
-        df = df.merge(terrain[keep], on="district", how="left")
-        df = df.merge(meta, on="district", how="left")
-    else:
-        raise FileNotFoundError(
-            f"{terrain_path} is required for live scoring (elevation, slope "
-            f"and ruggedness are model features). Run:\n"
-            f"    python -m src.data.download"
-        )
+    df = df.merge(terrain_table(names), on="district", how="left")
+    df = df.merge(dref.meta(names), on="district", how="left")
 
     df = bf._lag_and_roll(df)
     df = bf._add_departure(df, reference.climatology)
@@ -128,8 +167,28 @@ def build_live_features(conditions: pd.DataFrame,
     return df
 
 
+def _forecast_share(rows: pd.DataFrame, conditions: pd.DataFrame) -> pd.Series:
+    """Fraction of each row's 30-day lead-in that was forecast, not observed.
+
+    A set lookup rather than a MultiIndex `.get` — the same answer, and it
+    does not depend on pandas indexing behaviour that has changed between
+    major versions.
+    """
+    forecast_days = set(
+        zip(conditions.loc[conditions["is_forecast"], "district"],
+            conditions.loc[conditions["is_forecast"], "date"])
+    )
+
+    def share(row) -> float:
+        window = pd.date_range(row["date"] - pd.Timedelta(days=29), row["date"])
+        hits = sum((row["district"], day) in forecast_days for day in window)
+        return hits / len(window)
+
+    return rows.apply(share, axis=1)
+
+
 def score(model_name: str = "random_forest", horizon: int = 1,
-          days_ahead: int = 0) -> pd.DataFrame:
+          days_ahead: int = 0, verbose: bool = True) -> pd.DataFrame:
     conditions = load_conditions()
     reference = FeatureReference.load()
     bundle = _load_model(model_name, horizon)
@@ -159,27 +218,26 @@ def score(model_name: str = "random_forest", horizon: int = 1,
     rows["risk"] = model.predict_proba(rows[feats])[:, 1]
     rows["alert"] = rows["risk"] >= threshold
     rows["days_ahead"] = (rows["date"] - today).dt.days
+    rows["forecast_share"] = _forecast_share(rows, conditions)
 
-    # How much of each row's 30-day lead-in was forecast rather than observed.
-    fc = conditions.set_index(["district", "date"])["is_forecast"]
-    def forecast_share(r):
-        window = pd.date_range(r["date"] - pd.Timedelta(days=29), r["date"])
-        vals = [fc.get((r["district"], d), False) for d in window]
-        return float(np.mean(vals))
-    rows["forecast_share"] = rows.apply(forecast_share, axis=1)
-
-    out = rows[["district", "state", "basin", "date", "days_ahead", "risk",
-                "alert", "forecast_share", "rainfall_mm",
-                "river_discharge_m3s"]].sort_values(
+    out = rows[["district", "state", "basin", "lat", "lon", "date",
+                "days_ahead", "risk", "alert", "forecast_share",
+                "rainfall_mm", "river_discharge_m3s"]].sort_values(
         ["days_ahead", "risk"], ascending=[True, False]).reset_index(drop=True)
 
-    out_dir = ROOT / "data/live"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out.to_csv(out_dir / "risk.csv", index=False)
+    out_path = risk_path()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_path, index=False)
 
-    # ---- console report ------------------------------------------------
+    if verbose:
+        _report(out, model_name, threshold, today, out_path)
+    return out
+
+
+def _report(out: pd.DataFrame, model_name: str, threshold: float,
+            today: pd.Timestamp, out_path: Path) -> None:
     print("\n" + "=" * 78)
-    print(f"LIVE FLOOD RISK — probability a flood BEGINS within 7 days")
+    print("LIVE FLOOD RISK — probability a flood BEGINS within 7 days")
     print(f"model: {model_name} · alert threshold {threshold:.2f} · "
           f"scored {today.date()}")
     print("=" * 78)
@@ -188,20 +246,17 @@ def score(model_name: str = "random_forest", horizon: int = 1,
         label = "today" if d == 0 else f"+{d}d ({day['date'].iloc[0].date()})"
         fshare = day["forecast_share"].mean()
         print(f"\n{label}   [{fshare:.0%} of the input window is forecast]")
-        top = day.head(8)
-        for _, r in top.iterrows():
+        for _, r in day.head(8).iterrows():
             flag = "ALERT" if r["alert"] else "     "
             print(f"  {flag} {r['district']:16s} {r['risk']:6.1%}  "
                   f"rain {r['rainfall_mm']:6.1f}mm  "
                   f"Q {r['river_discharge_m3s']:8.1f} m3/s")
-        n_alert = int(day["alert"].sum())
-        print(f"  ... {n_alert}/{len(day)} districts at alert")
+        print(f"  ... {int(day['alert'].sum())}/{len(day)} districts at alert")
 
-    print(f"\nwrote {out_dir / 'risk.csv'}")
+    print(f"\nwrote {out_path}")
     print("Decision support, not an evacuation order. The threshold is set "
           "for a 20:1 miss:false-alarm cost, so false alarms are expected.")
     print("=" * 78 + "\n")
-    return out
 
 
 if __name__ == "__main__":
