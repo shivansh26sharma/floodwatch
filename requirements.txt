@@ -11,6 +11,7 @@
 streamlit>=1.30
 folium>=0.15
 streamlit-folium>=0.18
+altair>=5.0            # bundled with streamlit; pinned because the console uses it directly
 
 pandas>=2.0
 numpy>=1.24

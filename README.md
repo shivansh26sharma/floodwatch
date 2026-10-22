@@ -176,10 +176,52 @@ src/
     evaluate.py              lead time, cost threshold, calibration, ROC/PR
     explain.py               SHAP global + per-district-day local
     forecast.py              persistence / climatology / ARIMA / LSTM
-dashboard/app.py             Streamlit + Folium, historical replay
+  features/
+    reference.py             train-fitted climatology, percentile grids and
+                             medians, saved for serving  [anti-skew]
+  live/
+    fetch.py                 current + 16-day forecast feed (Open-Meteo)
+    predict.py               scores today and the next N days
+dashboard/app.py             Streamlit console: Live / Replay / Model / Data
 tests/test_no_leakage.py     leakage guards for the classifier
 tests/test_forecast.py       baseline-correctness + metric guards
+tests/test_live.py           train/serve-skew guards for the live path
 ```
+
+## Live / forward prediction
+
+```bash
+python -m src.live.fetch              # 92d history + 16d forecast per district
+python -m src.live.predict --days-ahead 6
+```
+
+`fetch` pulls the same two variables from the same provider, from the
+*forecast* endpoints instead of the archive ones. `predict` rebuilds the
+training features over that window and scores today plus each forecast day,
+so a district can show rising risk before anything has happened.
+
+Two things make this honest rather than a demo:
+
+**The feature reference is fitted once and reused.** Climatology departures
+and percentile ranks are defined *relative to a reference distribution*. If
+serving re-derived that reference from whatever 92-day window it happened to
+have, identical rainfall would produce a different feature value than it did
+in training — train/serve skew, the classic way a model that looked fine
+offline quietly produces nonsense in production. So the reference is fitted
+on the training split, saved to `outputs/models/feature_reference.pkl`, and
+loaded back for every live prediction. If that file is missing, live scoring
+**refuses to run** rather than improvising one.
+
+**Forecast decay is reported, not hidden.** Every output row carries
+`forecast_share`: how much of its 30-day feature window is numerical
+forecast rather than observation. It climbs with lead time, and the console
+shows it next to the risk, because a +6d number built from six days of
+forecast rainfall deserves less weight than today's.
+
+What is *not* fixed: the model was trained on ERA5/GloFAS reanalysis and is
+served analysis + NWP forecast. Related products, not the same series. The
+rigorous fix needs an archive of past forecasts, which we do not have — so
+say so in the report instead of presenting live output as backtested.
 
 ### Forecasting (`src/models/forecast.py`)
 

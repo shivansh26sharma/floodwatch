@@ -51,41 +51,94 @@ FLOOD_URL = "https://flood-api.open-meteo.com/v1/flood"
 PAST_DAYS = 92
 FORECAST_DAYS = 16
 
+# A feed older than this is refetched. Half a day: rainfall that matters
+# arrives faster than that, and the providers update more often than we
+# need, so there is no point hammering a free API every page view.
+MAX_AGE_HOURS = 12
+
+
+def conditions_path() -> Path:
+    return ROOT / "data/live/conditions.csv"
+
+
+def fetched_at() -> datetime | None:
+    """When the feed on disk was written, or None if there isn't one."""
+    path = conditions_path()
+    if not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+def age_hours() -> float | None:
+    stamp = fetched_at()
+    if stamp is None:
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds() / 3600.0
+
+
+def _one_district(name: str, lat: float, lon: float,
+                  past_days: int, forecast_days: int) -> pd.DataFrame:
+    rain = fetch_json(FORECAST_URL, {
+        "latitude": lat, "longitude": lon,
+        "daily": "precipitation_sum",
+        "past_days": past_days, "forecast_days": forecast_days,
+        "timezone": "Asia/Kolkata",
+    })["daily"]
+    rain_df = pd.DataFrame({
+        "date": pd.to_datetime(rain["time"]),
+        "district": name,
+        "rainfall_mm": rain["precipitation_sum"],
+    })
+    time.sleep(PAUSE_SECONDS)
+
+    flood = fetch_json(FLOOD_URL, {
+        "latitude": lat, "longitude": lon,
+        "daily": "river_discharge",
+        "past_days": past_days, "forecast_days": min(forecast_days, 30),
+    })["daily"]
+    flow_df = pd.DataFrame({
+        "date": pd.to_datetime(flood["time"]),
+        "district": name,
+        "river_discharge_m3s": flood["river_discharge"],
+    })
+    time.sleep(PAUSE_SECONDS)
+
+    return rain_df.merge(flow_df, on=["date", "district"], how="outer")
+
 
 def fetch_live(districts: dict[str, tuple[float, float]],
                past_days: int = PAST_DAYS,
                forecast_days: int = FORECAST_DAYS) -> pd.DataFrame:
-    frames = []
+    """Pull every district, tolerating a few failures but not a dead network.
+
+    FAIL FAST ON A BLOCKED NETWORK. `fetch_json` retries with exponential
+    backoff, which is right for a flaky connection and badly wrong for a
+    blocked one: 22 districts x 2 endpoints x a full backoff ladder is
+    something like twenty minutes of a frozen page to establish a fact the
+    first request already established. So if the first district yields
+    nothing at all, give up immediately and let the caller fall back to the
+    cached feed. Once ANY district has come back, individual failures are
+    tolerated — a partial feed scores the districts it has.
+    """
+    frames: list[pd.DataFrame] = []
+    failed: list[str] = []
 
     for name, (lat, lon) in districts.items():
         print(f"  live  {name}")
+        try:
+            frames.append(_one_district(name, lat, lon, past_days, forecast_days))
+        except Exception as exc:  # noqa: BLE001
+            failed.append(name)
+            if not frames:
+                raise RuntimeError(
+                    f"Live feed unreachable — the first district ({name}) "
+                    f"returned nothing: {exc}"
+                ) from exc
+            print(f"    skipped {name}: {exc}")
 
-        rain = fetch_json(FORECAST_URL, {
-            "latitude": lat, "longitude": lon,
-            "daily": "precipitation_sum",
-            "past_days": past_days, "forecast_days": forecast_days,
-            "timezone": "Asia/Kolkata",
-        })["daily"]
-        rain_df = pd.DataFrame({
-            "date": pd.to_datetime(rain["time"]),
-            "district": name,
-            "rainfall_mm": rain["precipitation_sum"],
-        })
-        time.sleep(PAUSE_SECONDS)
-
-        flood = fetch_json(FLOOD_URL, {
-            "latitude": lat, "longitude": lon,
-            "daily": "river_discharge",
-            "past_days": past_days, "forecast_days": min(forecast_days, 30),
-        })["daily"]
-        flow_df = pd.DataFrame({
-            "date": pd.to_datetime(flood["time"]),
-            "district": name,
-            "river_discharge_m3s": flood["river_discharge"],
-        })
-        time.sleep(PAUSE_SECONDS)
-
-        frames.append(rain_df.merge(flow_df, on=["date", "district"], how="outer"))
+    if failed:
+        print(f"[live] WARNING {len(failed)} district(s) missing from this "
+              f"feed: {', '.join(failed)}")
 
     out = pd.concat(frames, ignore_index=True).sort_values(["district", "date"])
 
@@ -104,9 +157,8 @@ def run(past_days: int = PAST_DAYS, forecast_days: int = FORECAST_DAYS) -> Path:
 
     df = fetch_live(coords, past_days, forecast_days)
 
-    out_dir = ROOT / "data/live"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "conditions.csv"
+    path = conditions_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
 
     observed = int((~df["is_forecast"]).sum())
@@ -117,6 +169,30 @@ def run(past_days: int = PAST_DAYS, forecast_days: int = FORECAST_DAYS) -> Path:
     print("[live] NOTE: this is forecast/analysis data, not the ERA5 "
           "reanalysis the model trained on — see the module docstring.")
     return path
+
+
+def ensure_conditions(max_age_hours: float = MAX_AGE_HOURS,
+                      force: bool = False) -> tuple[Path, bool]:
+    """Make sure a usable feed is on disk. Returns (path, refetched).
+
+    The dashboard calls this on start-up. `data/live/` is gitignored, so a
+    fresh deploy has no feed at all and has to go and get one; after that
+    the file is reused until it ages out. Nothing here raises on a network
+    failure if a usable feed already exists — a stale answer clearly
+    labelled as stale beats a dead page.
+    """
+    path = conditions_path()
+    age = age_hours()
+    if not force and age is not None and age < max_age_hours:
+        return path, False
+
+    try:
+        run()
+        return path, True
+    except Exception:
+        if path.exists():
+            return path, False
+        raise
 
 
 if __name__ == "__main__":
