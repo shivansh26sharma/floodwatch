@@ -130,7 +130,8 @@ def _add_seasonality(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _add_relative_intensity(df: pd.DataFrame, train_end: pd.Timestamp) -> pd.DataFrame:
+def _add_relative_intensity(df: pd.DataFrame, train_end: pd.Timestamp,
+                            reference=None) -> pd.DataFrame:
     """Where does today sit in THIS district's own historical distribution?
 
     The single biggest weakness of the raw features: discharge is measured
@@ -145,6 +146,22 @@ def _add_relative_intensity(df: pd.DataFrame, train_end: pd.Timestamp) -> pd.Dat
     leak the future into the present.
     """
     df = df.sort_values(ID_COLS).copy()
+
+    if reference is not None:
+        # Serving: use the distributions the model was TRAINED against, not
+        # whatever window we happen to be holding.
+        for col in reference.PCTILE_COLUMNS if hasattr(reference, "PCTILE_COLUMNS") \
+                else ("rainfall_mm", "river_discharge_m3s", "antecedent_rain_mm"):
+            if col not in df.columns:
+                continue
+            out = np.full(len(df), np.nan)
+            for district, idx in df.groupby("district").groups.items():
+                values = df.loc[idx, col].to_numpy(dtype=float)
+                out[df.index.get_indexer(idx)] = reference.percentile(
+                    district, col, values)
+            df[f"{col}_pctile"] = out
+        return df
+
     ref = df[df["date"] <= train_end]
 
     for col in ("rainfall_mm", "river_discharge_m3s", "antecedent_rain_mm"):
@@ -353,6 +370,17 @@ def build(horizon: int = 1, save: bool = True,
     df_train_mask = df["date"] <= pd.Timestamp(CFG.split.train_end)
     train_medians = df.loc[df_train_mask, feats].median()
     df[feats] = df[feats].fillna(train_medians)
+
+    # Persist everything live scoring will need to reproduce these features
+    # exactly. Without this, serving silently re-derives its own references
+    # and the model sees differently-scaled inputs.
+    from src.features.reference import fit as fit_reference
+    reference = fit_reference(
+        df, pd.Timestamp(CFG.split.train_end), clim, train_medians, feats
+    )
+    ref_path = reference.save()
+    print(f"[features] wrote feature reference -> {ref_path.name} "
+          f"({len(reference.quantiles)} district-column quantile grids)")
 
     print(f"[features] {len(feats)} features, {len(df):,} usable rows "
           f"({before - len(df):,} dropped for insufficient history)")
