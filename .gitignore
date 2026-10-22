@@ -25,3 +25,6 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# Live conditions are fetched on demand, never committed.
+data/live/
