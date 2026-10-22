@@ -82,6 +82,63 @@ def table(df: pd.DataFrame, **kwargs) -> None:
     st.dataframe(df, hide_index=True, **DF_KW, **kwargs)
 
 
+def risk_map(frame: pd.DataFrame, threshold: float, height: int = 430,
+             scale_to_threshold: bool = True) -> None:
+    """District risk map, framed on the districts themselves.
+
+    The view is set with `fit_bounds`, not with a zoom level guessed from
+    the latitude span. The guess was wrong the first time this ran on the
+    deploy — the map opened on the whole world — because a zoom level has
+    to be chosen before Leaflet knows how wide its container is, and the
+    hosted layout is not the local one. Bounds do not have that problem:
+    they are applied after layout, so the frame is correct by construction
+    whatever the container turns out to be.
+    """
+    try:
+        import folium
+        from streamlit_folium import st_folium
+    except ImportError:
+        st.info("Install folium + streamlit-folium for the map view.")
+        table(frame[["district", "risk", "lat", "lon"]])
+        return
+
+    pts = frame.dropna(subset=["lat", "lon"])
+    if pts.empty:
+        st.info("No district coordinates available for this day.")
+        return
+
+    fmap = folium.Map(location=[pts["lat"].mean(), pts["lon"].mean()],
+                      zoom_start=5, tiles="OpenStreetMap", control_scale=True)
+
+    for _, r in pts.iterrows():
+        colour = ("#b91c1c" if r["risk"] >= threshold
+                  else "#f59e0b" if r["risk"] >= threshold * 0.6
+                  else "#15803d")
+        # At a 1.6% base rate, sizing markers against 1.0 makes every
+        # district the same dot. Size against the alert threshold instead.
+        radius = (7 + 18 * min(1.0, float(r["risk"]) / max(threshold, 1e-6))
+                  if scale_to_threshold else 8 + 16 * float(r["risk"]))
+        tip = (f"<b>{r['district']}</b><br>"
+               f"Risk: {r['risk']:.1%}<br>"
+               f"Rain: {r['rainfall_mm']:.1f} mm<br>"
+               f"Discharge: {r['river_discharge_m3s']:,.0f} m³/s")
+        if "forecast_share" in pts.columns:
+            tip += f"<br>Forecast share: {r['forecast_share']:.0%}"
+        folium.CircleMarker(
+            location=[r["lat"], r["lon"]], radius=radius, color=colour,
+            fill=True, fill_opacity=0.6, weight=1, tooltip=tip,
+        ).add_to(fmap)
+
+    pad = 0.75
+    fmap.fit_bounds([[pts["lat"].min() - pad, pts["lon"].min() - pad],
+                     [pts["lat"].max() + pad, pts["lon"].max() + pad]])
+
+    # returned_objects=[] stops the component sending map state back on
+    # every pan, which otherwise reruns the whole script mid-drag.
+    st_folium(fmap, height=height, use_container_width=True,
+              returned_objects=[])
+
+
 # ----------------------------------------------------------------------
 # Chrome
 # ----------------------------------------------------------------------
@@ -327,9 +384,9 @@ n_basins = data["basin"].nunique() if "basin" in data.columns else 0
 span = f"{data['date'].min():%Y}–{data['date'].max():%Y}"
 
 if source == "precomputed":
-    src_pill = pill("real data · ERA5 · GloFAS · DFO", "ok", "#16a34a")
+    src_pill = pill("real data", "ok", "#16a34a")
 elif source == "real":
-    src_pill = pill("real data · raw sources", "ok", "#16a34a")
+    src_pill = pill("real data", "ok", "#16a34a")
 else:
     src_pill = pill("synthetic fixture — numbers are fake", "bad", "#dc2626")
 
@@ -475,38 +532,7 @@ with tab_live:
 
             with left:
                 st.markdown(f"**Risk map — {day_label(picked)}**")
-                try:
-                    import folium
-                    from streamlit_folium import st_folium
-
-                    centre = [day["lat"].mean(), day["lon"].mean()]
-                    spread = max(day["lat"].max() - day["lat"].min(),
-                                 day["lon"].max() - day["lon"].min())
-                    zoom = (4 if spread > 12 else 5 if spread > 6
-                            else 7 if spread > 2 else 8)
-                    fmap = folium.Map(location=centre, zoom_start=zoom,
-                                      tiles="OpenStreetMap")
-                    for _, r in day.iterrows():
-                        colour = ("#b91c1c" if r["risk"] >= threshold
-                                  else "#f59e0b" if r["risk"] >= threshold * 0.6
-                                  else "#15803d")
-                        folium.CircleMarker(
-                            location=[r["lat"], r["lon"]],
-                            # Scale against the threshold, not against 1.0:
-                            # at a 1.6% base rate every marker would
-                            # otherwise be the same dot.
-                            radius=7 + 18 * min(1.0, float(r["risk"]) / max(threshold, 1e-6)),
-                            color=colour, fill=True, fill_opacity=0.6, weight=1,
-                            tooltip=(f"<b>{r['district']}</b><br>"
-                                     f"Risk: {r['risk']:.1%}<br>"
-                                     f"Rain: {r['rainfall_mm']:.1f} mm<br>"
-                                     f"Discharge: {r['river_discharge_m3s']:,.0f} m³/s<br>"
-                                     f"Forecast share: {r['forecast_share']:.0%}"),
-                        ).add_to(fmap)
-                    st_folium(fmap, height=430, use_container_width=True)
-                except ImportError:
-                    st.info("Install folium + streamlit-folium for the map.")
-                    table(day[["district", "risk", "lat", "lon"]])
+                risk_map(day, threshold, height=430)
 
             with right:
                 st.markdown("**Watchlist**")
@@ -673,36 +699,9 @@ with tab_replay:
 
     with left:
         st.markdown("**Risk map**")
-        try:
-            import folium
-            from streamlit_folium import st_folium
-
-            centre = [rday["lat"].mean(), rday["lon"].mean()]
-            spread = max(rday["lat"].max() - rday["lat"].min(),
-                         rday["lon"].max() - rday["lon"].min())
-            zoom = (4 if spread > 12 else 5 if spread > 6
-                    else 7 if spread > 2 else 8)
-            # OpenStreetMap, not CartoDB: Carto's positron tiles now demand
-            # an API key and watermark the map for anyone without one.
-            fmap = folium.Map(location=centre, zoom_start=zoom,
-                              tiles="OpenStreetMap")
-            for _, r in rday.iterrows():
-                colour = ("#b91c1c" if r["risk"] >= threshold
-                          else "#f59e0b" if r["risk"] >= threshold * 0.6
-                          else "#15803d")
-                folium.CircleMarker(
-                    location=[r["lat"], r["lon"]],
-                    radius=8 + 16 * float(r["risk"]),
-                    color=colour, fill=True, fill_opacity=0.65, weight=1,
-                    tooltip=(f"<b>{r['district']}</b><br>"
-                             f"Risk: {r['risk']:.1%}<br>"
-                             f"Rainfall: {r['rainfall_mm']:.1f} mm<br>"
-                             f"Discharge: {r['river_discharge_m3s']:,.0f} m³/s"),
-                ).add_to(fmap)
-            st_folium(fmap, height=420, use_container_width=True)
-        except ImportError:
-            st.info("Install folium + streamlit-folium for the map view.")
-            table(rday[["district", "risk", "lat", "lon"]])
+        # Replay scores span the full 0-1 range on a big event day, so
+        # markers there are sized against 1.0 rather than the threshold.
+        risk_map(rday, threshold, height=420, scale_to_threshold=False)
 
     with right:
         st.markdown("**Ranked districts**")
