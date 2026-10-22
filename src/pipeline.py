@@ -17,6 +17,7 @@ the fixture is the *seed* that makes a fresh clone self-healing.
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from src.config import CFG, ROOT
@@ -28,6 +29,14 @@ def _effective_source_for_fingerprint() -> str:
         return effective_source()
     except Exception:  # noqa: BLE001
         return str(CFG.data.source)
+
+
+def _sklearn_version() -> str:
+    try:
+        import sklearn
+        return str(sklearn.__version__)
+    except Exception:  # noqa: BLE001
+        return "absent"
 
 
 def build_fingerprint() -> str:
@@ -42,6 +51,13 @@ def build_fingerprint() -> str:
     So we stamp the build with a fingerprint and rebuild when it moves.
     Anything that alters column names, the district set, the date range or
     the target definition belongs in here.
+
+    The RUNTIME is in here too, because a model is a pickle. A model fitted
+    under one scikit-learn and unpickled under another is at best a warning
+    and at worst a silently different estimator, and the same repo does get
+    built by more than one interpreter — a laptop venv, a cloud deploy, a
+    sandbox. Hashing the versions means whichever runtime opens the project
+    next rebuilds rather than loading a pickle it cannot vouch for.
     """
     parts = {
         "districts": sorted(CFG.project.districts) if isinstance(
@@ -58,6 +74,9 @@ def build_fingerprint() -> str:
         "val_end": str(CFG.split.val_end),
         # Schema version — bump by hand after any column rename.
         "schema": 2,
+        # Runtime: pickles are not portable across these.
+        "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
+        "sklearn": _sklearn_version(),
     }
     blob = json.dumps(parts, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
