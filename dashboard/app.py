@@ -48,7 +48,12 @@ st.set_page_config(page_title="FloodWatch — flood risk console",
                    page_icon="🌊", layout="wide")
 
 HORIZON = 1
-DEFAULT_MODEL = "random_forest"
+# Logistic regression, not the forest. The forest is quieter (10.5% duty
+# cycle against 14.7%) but it warns half the events at a third of the
+# notice, and at its operating threshold it peaked at 0.017 during the
+# Kerala flood of August 2018 — the largest event in the record. A default
+# that misses that is the wrong default.
+DEFAULT_MODEL = "logistic"
 LIVE_DAYS = 6          # today plus six forecast days
 FEED_MAX_AGE_HOURS = 12
 
@@ -497,8 +502,10 @@ with st.sidebar:
         format_func=lambda s: s.replace("_", " ").title(),
     )
     st.caption(
-        "Both models are kept. Logistic regression gives longer lead times; "
-        "the forest is better calibrated. The Model tab has the numbers."
+        "Logistic regression is the default: it warns 65% of recorded events "
+        "a median 13 days ahead, against 51% at 5 days for the forest. "
+        "Neither model's output is a calibrated probability — the Model tab "
+        "says what that means."
     )
     st.divider()
     if st.button("↻ Refresh live feed", **_width_kw(st.button)):
@@ -1050,9 +1057,22 @@ with tab_model:
                 chart(diag + pts)
                 st.caption(
                     f"Points below the diagonal mean the model over-states "
-                    f"risk. Brier score {metrics['brier']:.3f}. Calibration "
-                    f"matters more than ranking here, because an officer acts "
-                    f"on the number, not on the ordering."
+                    f"risk. Brier {metrics['brier']:.3f} — against "
+                    f"{1 - metrics['accuracy_all_negative']:.3f} for a model "
+                    f"that always predicts zero, which this does not beat."
+                )
+                st.warning(
+                    "**These scores are not calibrated probabilities.** On "
+                    "the test split the mean predicted risk is far above the "
+                    "actual onset rate — about 16x for logistic regression "
+                    "and 7x for the forest — so a reading of 0.30 does not "
+                    "mean a 30% chance. Treat the output as a ranking score. "
+                    "That inflation is also why the alert threshold sits "
+                    "where it does rather than near the base rate. The fix "
+                    "is isotonic calibration fitted on the validation split; "
+                    "it is listed as future work rather than quietly "
+                    "half-done, because it moves every number on this page.",
+                    icon="📐",
                 )
 
         leads = report_csv(f"lead_times_{MODEL_NAME}_h{HORIZON}")
