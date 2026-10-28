@@ -141,35 +141,202 @@ def risk_map(frame: pd.DataFrame, threshold: float, height: int = 430,
 
 # ----------------------------------------------------------------------
 # Chrome
+#
+# All decoration is inline SVG data URIs and CSS gradients — no external
+# image, no CDN, nothing to fail on a slow or offline deploy. The water
+# motif is kept to the page edges and the sidebar: the moment a texture
+# runs under a number, the number gets harder to read, and this is a page
+# people are meant to read numbers off.
 # ----------------------------------------------------------------------
 
+# Two offset wave profiles. Encoded rather than raw (%3C, %23) so the URI
+# survives any CSS parser.
+def _wave(c1: str, c2: str, o1: str = ".55", o2: str = ".40") -> str:
+    return (
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+        "viewBox='0 0 1200 160' preserveAspectRatio='none'%3E"
+        f"%3Cpath d='M0,78 C150,128 330,28 600,78 C870,128 1050,28 1200,78 "
+        f"L1200,160 L0,160 Z' fill='%23{c1}' opacity='{o1}'/%3E"
+        f"%3Cpath d='M0,104 C210,54 390,154 600,104 C810,54 990,154 1200,104 "
+        f"L1200,160 L0,160 Z' fill='%23{c2}' opacity='{o2}'/%3E"
+        "%3C/svg%3E"
+    )
+
+
+PAGE_WAVE = _wave("bfdbfe", "7dd3fc", ".32", ".22")
+BAR_WAVE = _wave("2563eb", "0ea5e9", ".16", ".12")
+SIDE_WAVE = _wave("38bdf8", "60a5fa", ".22", ".16")
+
 st.markdown(
-    """
+    f"""
     <style>
-      .block-container {padding-top: 1.1rem; max-width: 1500px;}
-      .fw-bar {display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;
-        border:1px solid #e2e8f0; border-radius:14px; padding:.8rem 1.1rem;
-        background:linear-gradient(90deg,#f8fafc 0%,#eef2ff 100%);
-        margin-bottom:1.1rem;}
-      .fw-brand {font-weight:750; font-size:1.2rem; letter-spacing:-.02em;
-        color:#0f172a; margin-right:.5rem;}
-      .fw-brand span {color:#2563eb;}
-      .fw-sub {color:#64748b; font-size:.82rem; margin-right:.5rem;}
-      .fw-pill {font-size:.72rem; font-weight:650; letter-spacing:.04em;
-        text-transform:uppercase; padding:.26rem .62rem; border-radius:999px;
-        border:1px solid #cbd5e1; color:#334155; background:#fff;
-        white-space:nowrap;}
-      .fw-pill.ok   {border-color:#86efac; color:#15803d; background:#f0fdf4;}
-      .fw-pill.warn {border-color:#fcd34d; color:#92400e; background:#fffbeb;}
-      .fw-pill.bad  {border-color:#fca5a5; color:#b91c1c; background:#fef2f2;}
-      .fw-dot {height:7px; width:7px; border-radius:50%; display:inline-block;
-        margin-right:.4rem; vertical-align:middle;}
-      .fw-grow {flex:1 1 auto;}
-      div[data-testid="stMetric"] {border:1px solid #e2e8f0; border-radius:14px;
-        padding:.85rem 1rem; background:#ffffff;}
-      div[data-testid="stMetricLabel"] p {font-size:.78rem; color:#64748b;}
-      button[data-baseweb="tab"] {font-weight:650;}
-      .fw-note {color:#64748b; font-size:.8rem; line-height:1.45;}
+      /* ---- page ---------------------------------------------------- */
+      [data-testid="stAppViewContainer"] {{
+        background:
+          radial-gradient(1100px 460px at 8% -12%, #dbeafe 0%, rgba(219,234,254,0) 62%),
+          radial-gradient(900px 380px at 92% -6%, #e0f2fe 0%, rgba(224,242,254,0) 58%),
+          linear-gradient(180deg, #f8fafc 0%, #eef5fb 100%);
+      }}
+      /* A shallow tide along the bottom of the viewport. Fixed, behind
+         everything, and click-through, so it decorates without
+         interfering. */
+      [data-testid="stAppViewContainer"]::after {{
+        content:""; position:fixed; left:0; right:0; bottom:0; height:150px;
+        background-image:url("{PAGE_WAVE}");
+        background-size:1200px 150px; background-repeat:repeat-x;
+        background-position:0 bottom;
+        animation:fw-drift 26s linear infinite;
+        pointer-events:none; z-index:0;
+      }}
+      @keyframes fw-drift {{
+        from {{background-position:0 bottom;}}
+        to   {{background-position:-1200px bottom;}}
+      }}
+      .block-container {{padding-top:1.1rem; max-width:1500px;
+        position:relative; z-index:1;}}
+      [data-testid="stHeader"] {{background:transparent;}}
+
+      /* ---- status bar ---------------------------------------------- */
+      .fw-bar {{position:relative; overflow:hidden;
+        display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;
+        border:1px solid rgba(37,99,235,.16); border-radius:18px;
+        padding:.95rem 1.2rem 1.15rem;
+        background:linear-gradient(118deg,#ffffff 0%,#f0f7ff 52%,#e4f1fd 100%);
+        box-shadow:0 10px 30px -18px rgba(13,42,92,.45);
+        margin-bottom:1.2rem;}}
+      .fw-bar::after {{
+        content:""; position:absolute; left:0; right:0; bottom:-2px;
+        height:46px;
+        background-image:url("{BAR_WAVE}");
+        background-size:1200px 46px; background-repeat:repeat-x;
+        animation:fw-drift 18s linear infinite;
+        pointer-events:none;}}
+      .fw-bar > * {{position:relative; z-index:1;}}
+      .fw-brand {{font-weight:800; font-size:1.3rem; letter-spacing:-.025em;
+        color:#0b2545; margin-right:.55rem;}}
+      .fw-brand span {{background:linear-gradient(92deg,#2563eb,#0ea5e9);
+        -webkit-background-clip:text; background-clip:text;
+        -webkit-text-fill-color:transparent;}}
+      .fw-sub {{color:#5b7a9b; font-size:.82rem; margin-right:.5rem;}}
+      .fw-grow {{flex:1 1 auto;}}
+
+      /* ---- pills ---------------------------------------------------- */
+      .fw-pill {{font-size:.71rem; font-weight:700; letter-spacing:.05em;
+        text-transform:uppercase; padding:.3rem .68rem; border-radius:999px;
+        border:1px solid rgba(148,163,184,.55); color:#334155;
+        background:rgba(255,255,255,.88);
+        box-shadow:0 1px 2px rgba(15,23,42,.05);
+        backdrop-filter:blur(4px); white-space:nowrap;}}
+      .fw-pill.ok   {{border-color:#86efac; color:#15803d;
+        background:linear-gradient(180deg,#f0fdf4,#dcfce7);}}
+      .fw-pill.warn {{border-color:#fcd34d; color:#92400e;
+        background:linear-gradient(180deg,#fffbeb,#fef3c7);}}
+      .fw-pill.bad  {{border-color:#fca5a5; color:#b91c1c;
+        background:linear-gradient(180deg,#fef2f2,#fee2e2);}}
+      .fw-dot {{height:7px; width:7px; border-radius:50%; display:inline-block;
+        margin-right:.4rem; vertical-align:middle;
+        box-shadow:0 0 0 3px rgba(22,163,74,.14);}}
+      .fw-pill.ok .fw-dot {{animation:fw-pulse 2.4s ease-in-out infinite;}}
+      @keyframes fw-pulse {{
+        0%,100% {{box-shadow:0 0 0 2px rgba(22,163,74,.18);}}
+        50%     {{box-shadow:0 0 0 6px rgba(22,163,74,0);}}
+      }}
+
+      /* ---- sidebar: the dark console rail --------------------------- */
+      [data-testid="stSidebar"] {{
+        background:linear-gradient(185deg,#0b2545 0%,#12315c 55%,#163e75 100%);
+        border-right:1px solid rgba(255,255,255,.08);}}
+      [data-testid="stSidebar"]::after {{
+        content:""; position:absolute; left:0; right:0; bottom:0; height:150px;
+        background-image:url("{SIDE_WAVE}");
+        background-size:900px 150px; background-repeat:repeat-x;
+        animation:fw-drift 32s linear infinite;
+        pointer-events:none;}}
+      [data-testid="stSidebar"] .stMarkdown,
+      [data-testid="stSidebar"] label,
+      [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+      [data-testid="stSidebar"] h3,
+      [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+      [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{
+        color:#dbeafe !important;}}
+      [data-testid="stSidebar"] hr {{border-color:rgba(255,255,255,.16);}}
+      [data-testid="stSidebar"] h3 {{letter-spacing:.02em;}}
+
+      /* ---- buttons --------------------------------------------------- */
+      .stButton > button, [data-testid="stBaseButton-secondary"] {{
+        background:linear-gradient(135deg,#0ea5e9 0%,#2563eb 100%);
+        color:#ffffff !important; border:0; border-radius:12px;
+        padding:.62rem 1.05rem; font-weight:700; letter-spacing:.01em;
+        box-shadow:0 8px 18px -8px rgba(37,99,235,.85),
+                   inset 0 1px 0 rgba(255,255,255,.22);
+        transition:transform .16s ease, box-shadow .16s ease, filter .16s ease;}}
+      .stButton > button:hover {{transform:translateY(-2px); filter:brightness(1.06);
+        box-shadow:0 14px 26px -10px rgba(37,99,235,.95),
+                   inset 0 1px 0 rgba(255,255,255,.3);}}
+      .stButton > button:active {{transform:translateY(0);
+        box-shadow:0 5px 12px -8px rgba(37,99,235,.9);}}
+      .stButton > button p {{color:#ffffff !important; font-weight:700;}}
+
+      /* ---- tabs ------------------------------------------------------ */
+      [data-testid="stTabs"] [role="tablist"] {{gap:.35rem;
+        align-items:center; border-bottom:0 !important;
+        background:rgba(255,255,255,.65); padding:.32rem; border-radius:14px;
+        border:1px solid rgba(148,163,184,.3); backdrop-filter:blur(6px);
+        box-shadow:0 6px 18px -16px rgba(13,42,92,.8);}}
+      [data-testid="stTab"] {{font-weight:700; border-radius:10px;
+        padding:.42rem .9rem; margin:0 !important; color:#475569;
+        border-bottom:0 !important; transition:all .15s ease;}}
+      [data-testid="stTab"] p {{font-weight:700; color:#475569;}}
+      [data-testid="stTab"]:hover {{background:rgba(37,99,235,.08);}}
+      [data-testid="stTab"]:hover p {{color:#1d4ed8;}}
+      [data-testid="stTab"][aria-selected="true"] {{
+        background:linear-gradient(135deg,#0ea5e9,#2563eb);
+        box-shadow:0 6px 14px -8px rgba(37,99,235,.9);}}
+      [data-testid="stTab"][aria-selected="true"] p {{color:#ffffff !important;}}
+      [data-testid="stTabs"] [role="tablist"] + div,
+      [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{
+        background:transparent !important;}}
+
+      /* ---- horizon picker (segmented control) ------------------------ */
+      button[data-variant="segmented_control"] {{border-radius:10px !important;
+        font-weight:650; transition:all .15s ease;}}
+      button[data-variant="segmented_control"]:hover {{
+        border-color:#93c5fd !important;}}
+      button[data-variant="segmented_control"][aria-checked="true"] {{
+        background:linear-gradient(135deg,#0ea5e9,#2563eb) !important;
+        border-color:transparent !important;
+        box-shadow:0 6px 14px -8px rgba(37,99,235,.9);}}
+      button[data-variant="segmented_control"][aria-checked="true"] p,
+      button[data-variant="segmented_control"][data-selected="true"] p {{
+        color:#ffffff !important; font-weight:700;}}
+
+      /* ---- metric cards ---------------------------------------------- */
+      div[data-testid="stMetric"] {{position:relative; overflow:hidden;
+        border:1px solid rgba(148,163,184,.3); border-radius:16px;
+        padding:.95rem 1.05rem .85rem;
+        background:linear-gradient(170deg,#ffffff 0%,#f6fbff 100%);
+        box-shadow:0 10px 24px -20px rgba(13,42,92,.75);
+        transition:transform .16s ease, box-shadow .16s ease;}}
+      div[data-testid="stMetric"]::before {{content:""; position:absolute;
+        left:0; top:0; height:3px; width:100%;
+        background:linear-gradient(90deg,#0ea5e9,#2563eb);}}
+      div[data-testid="stMetric"]:hover {{transform:translateY(-3px);
+        box-shadow:0 18px 34px -22px rgba(13,42,92,.9);}}
+      [data-testid="stMetricLabel"] p {{font-size:.76rem; color:#64748b;
+        text-transform:uppercase; letter-spacing:.06em; font-weight:700;}}
+      div[data-testid="stMetricValue"] {{color:#0b2545;}}
+
+      /* ---- panels ---------------------------------------------------- */
+      [data-testid="stAlert"] {{border-radius:14px;
+        box-shadow:0 8px 20px -18px rgba(13,42,92,.8);}}
+      [data-testid="stExpander"] details {{border-radius:14px;
+        border:1px solid rgba(148,163,184,.35);
+        background:rgba(255,255,255,.75);}}
+      [data-testid="stDataFrame"] {{border-radius:12px; overflow:hidden;
+        border:1px solid rgba(148,163,184,.3);}}
+      iframe {{border-radius:14px;}}
+
+      .fw-note {{color:#64748b; font-size:.8rem; line-height:1.45;}}
     </style>
     """,
     unsafe_allow_html=True,
