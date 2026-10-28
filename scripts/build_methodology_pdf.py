@@ -7,6 +7,7 @@ settings, the source modules for what is computed, and
 outputs/reports/summary_h1.json for results. Nothing is from memory.
 """
 
+import os
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -20,7 +21,9 @@ from reportlab.platypus import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = str(ROOT / "docs" / "FloodWatch_methodology.pdf")
+# Writes into the repo's docs/ by default; FW_PDF_OUT overrides it, which is
+# what lets the document be built somewhere else without editing this file.
+OUT = os.environ.get("FW_PDF_OUT", str(ROOT / "docs" / "FloodWatch_methodology.pdf"))
 
 INK = colors.HexColor("#0f172a")
 BLUE = colors.HexColor("#1d4ed8")
@@ -101,6 +104,49 @@ def table(rows, widths, header=True, align_right=(), zebra=True,
         if zebra:
             for r in range(2, len(data), 2):
                 cmds.append(("BACKGROUND", (0, r), (-1, r), BAND))
+    t.setStyle(TableStyle(cmds))
+    return t
+
+
+BANDTXT = style("band", parent=CELL, fontName="Helvetica-Bold",
+                fontSize=8.4, textColor=colors.HexColor("#14325c"))
+NUM = style("num", parent=CELL, textColor=MUTED, fontSize=7.6)
+
+
+def feature_table(groups, widths):
+    """One row per feature, with a banded row per group.
+
+    The grouped counts in section 2.5 say how the feature set is shaped;
+    this says exactly what is in it, which is what anyone checking the
+    work actually needs.
+    """
+    data = [[Paragraph(h, CELLH) for h in ("#", "Feature", "Definition")]]
+    cmds = [
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("BACKGROUND", (0, 0), (-1, 0), INK),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, INK),
+    ]
+    n = 0
+    for title, items in groups:
+        r = len(data)
+        data.append([Paragraph(title, BANDTXT), "", ""])
+        cmds += [("SPAN", (0, r), (-1, r)),
+                 ("BACKGROUND", (0, r), (-1, r), colors.HexColor("#dde9f6")),
+                 ("TOPPADDING", (0, r), (-1, r), 6),
+                 ("BOTTOMPADDING", (0, r), (-1, r), 5)]
+        for name, desc in items:
+            n += 1
+            data.append([
+                Paragraph(str(n), NUM),
+                Paragraph(f"<font face='Courier' size='7.6'>{name}</font>", CELL),
+                Paragraph(desc, CELL)])
+            cmds.append(("LINEBELOW", (0, len(data) - 1), (-1, len(data) - 1),
+                         0.3, colors.HexColor("#e8eef5")))
+    t = Table(data, colWidths=widths, repeatRows=1)
     t.setStyle(TableStyle(cmds))
     return t
 
@@ -343,7 +389,8 @@ def story():
     s.append(P("2.5 &nbsp; Feature engineering", H3))
     s.append(P(
         "59 features are built from two measured series, the terrain "
-        "attributes and the calendar. The count breaks down as follows.", BODY))
+        "attributes and the calendar. The count breaks down as follows; "
+        "<b>Appendix A lists all 59 by name</b>.", BODY))
     s.append(table([
         ["Group", "n", "Features"],
         ["Raw", "2", "rainfall_mm, river_discharge_m3s"],
@@ -630,6 +677,187 @@ def story():
          "training set"],
         ], widths=[74 * mm, 96 * mm]),
     ]))
+
+
+    # ================= APPENDIX A =================
+    s.append(PageBreak())
+    s.append(P("Appendix A &nbsp; The 59 features in full", H2))
+    s.append(P(
+        "Read straight out of <font face='Courier'>features_h1.parquet</font> "
+        "by <font face='Courier'>feature_columns()</font>, in the order the "
+        "model receives them. Every rolling window is <b>left-closed</b>: it "
+        "covers the days <i>before</i> t, never t itself, so the current day "
+        "cannot enter the window that is meant to describe its own past. "
+        "Everything is grouped per district, so one district's history never "
+        "reaches another's row.", BODY))
+
+    rolls = "Rolling {stat} of {what} over the preceding {n} days."
+    s.append(feature_table([
+        ("Measured series", [
+            ("rainfall_mm",
+             "ERA5 daily precipitation total at the district point, in mm."),
+            ("river_discharge_m3s",
+             "GloFAS daily mean river discharge for the grid cell containing "
+             "the point, in m<super>3</super>/s. Modelled routing, not a gauge "
+             "stage reading."),
+        ]),
+        ("Terrain (static per district)", [
+            ("mean_elevation_m",
+             "Elevation at the district point, in metres. Note the column "
+             "name: the stored value is the centre sample of the five-point "
+             "cross, not the mean of the five."),
+            ("mean_slope_deg",
+             "Slope in degrees, from the finite-difference gradient of the "
+             "five elevation samples taken at &#177;0.05&#176; (~5.5 km)."),
+            ("terrain_ruggedness_m",
+             "Standard deviation of those five elevation samples &#8212; a "
+             "proxy for local relief."),
+        ]),
+        ("Rainfall lags", [
+            ("rainfall_mm_lag1", "Rainfall one day earlier."),
+            ("rainfall_mm_lag2", "Rainfall two days earlier."),
+            ("rainfall_mm_lag3", "Rainfall three days earlier."),
+            ("rainfall_mm_lag5", "Rainfall five days earlier."),
+            ("rainfall_mm_lag7", "Rainfall seven days earlier."),
+        ]),
+        ("Rainfall rolling windows", [
+            ("rainfall_mm_rollmean3", rolls.format(stat="mean", what="rainfall", n=3)),
+            ("rainfall_mm_rollmax3", rolls.format(stat="maximum", what="rainfall", n=3)),
+            ("rainfall_mm_rollsum3", rolls.format(stat="total", what="rainfall", n=3)),
+            ("rainfall_mm_rollmean7", rolls.format(stat="mean", what="rainfall", n=7)),
+            ("rainfall_mm_rollmax7", rolls.format(stat="maximum", what="rainfall", n=7)),
+            ("rainfall_mm_rollsum7", rolls.format(stat="total", what="rainfall", n=7)),
+            ("rainfall_mm_rollmean14", rolls.format(stat="mean", what="rainfall", n=14)),
+            ("rainfall_mm_rollmax14", rolls.format(stat="maximum", what="rainfall", n=14)),
+            ("rainfall_mm_rollsum14", rolls.format(stat="total", what="rainfall", n=14)),
+            ("rainfall_mm_rollmean30", rolls.format(stat="mean", what="rainfall", n=30)),
+            ("rainfall_mm_rollmax30", rolls.format(stat="maximum", what="rainfall", n=30)),
+            ("rainfall_mm_rollsum30", rolls.format(stat="total", what="rainfall", n=30)),
+        ]),
+        ("Discharge lags", [
+            ("river_discharge_m3s_lag1", "Discharge one day earlier."),
+            ("river_discharge_m3s_lag2", "Discharge two days earlier."),
+            ("river_discharge_m3s_lag3", "Discharge three days earlier."),
+            ("river_discharge_m3s_lag5", "Discharge five days earlier."),
+            ("river_discharge_m3s_lag7", "Discharge seven days earlier."),
+        ]),
+        ("Discharge rolling windows &#8212; mean and max only", [
+            ("river_discharge_m3s_rollmean3", rolls.format(stat="mean", what="discharge", n=3)),
+            ("river_discharge_m3s_rollmax3", rolls.format(stat="maximum", what="discharge", n=3)),
+            ("river_discharge_m3s_rollmean7", rolls.format(stat="mean", what="discharge", n=7)),
+            ("river_discharge_m3s_rollmax7", rolls.format(stat="maximum", what="discharge", n=7)),
+            ("river_discharge_m3s_rollmean14", rolls.format(stat="mean", what="discharge", n=14)),
+            ("river_discharge_m3s_rollmax14", rolls.format(stat="maximum", what="discharge", n=14)),
+            ("river_discharge_m3s_rollmean30", rolls.format(stat="mean", what="discharge", n=30)),
+            ("river_discharge_m3s_rollmax30", rolls.format(stat="maximum", what="discharge", n=30)),
+        ]),
+        ("Accumulation and rate of change", [
+            ("antecedent_rain_mm",
+             "Total rainfall over the preceding 15 days &#8212; how saturated "
+             "the ground already is. This is the term that decides whether a "
+             "given rainfall floods or drains."),
+            ("river_discharge_delta_1d",
+             "Change in discharge since the previous day. A rising river is "
+             "more dangerous than a high static one."),
+            ("river_discharge_delta_3d", "Change in discharge over three days."),
+        ]),
+        ("Climatology departure", [
+            ("rainfall_climatology_mm",
+             "Mean rainfall for this district on this day-of-year, fitted on "
+             "the <b>training split only</b> and smoothed over a 15-day "
+             "centred window."),
+            ("rainfall_departure_mm",
+             "Today's rainfall minus that climatology &#8212; how unusual "
+             "today is for the time of year."),
+            ("rainfall_departure_ratio",
+             "Today's rainfall divided by that climatology."),
+        ]),
+        ("Seasonality", [
+            ("doy_sin",
+             "sin(2&#960; &#215; day-of-year / 365.25). Cyclical, so 31 "
+             "December sits next to 1 January instead of 364 days away."),
+            ("doy_cos", "cos(2&#960; &#215; day-of-year / 365.25)."),
+            ("is_monsoon", "1 for June to September, 0 otherwise."),
+        ]),
+        ("Basin context &#8212; same day, other districts", [
+            ("basin_rainfall_mm_mean",
+             "Mean rainfall across every district in the same river basin on "
+             "the same day."),
+            ("basin_rainfall_mm_max",
+             "Maximum rainfall anywhere in the basin that day."),
+            ("rainfall_mm_vs_basin",
+             "This district's rainfall divided by its basin mean &#8212; how "
+             "extreme it is relative to its neighbours."),
+            ("basin_river_discharge_m3s_mean", "Basin mean discharge that day."),
+            ("basin_river_discharge_m3s_max", "Basin maximum discharge that day."),
+            ("river_discharge_m3s_vs_basin",
+             "This district's discharge divided by its basin mean."),
+            ("basin_antecedent_mean",
+             "Basin mean of the 15-day antecedent rainfall &#8212; a cheap "
+             "proxy for upstream saturation, without building a routing model."),
+        ]),
+        ("Percentile rank within the district's own history", [
+            ("rainfall_mm_pctile",
+             "Where today's rainfall sits in this district's "
+             "<b>training-period</b> rainfall distribution, 0 to 1."),
+            ("river_discharge_m3s_pctile",
+             "The same for discharge. This is what makes 800&nbsp;m"
+             "<super>3</super>/s readable as a drought on the Brahmaputra and "
+             "a disaster on a Konkan stream."),
+            ("antecedent_rain_mm_pctile",
+             "The same for 15-day antecedent rainfall."),
+        ]),
+        ("River basin, one-hot", [
+            ("basin_Brahmaputra", "1 if the district is in the Brahmaputra basin."),
+            ("basin_Kerala", "1 if the district is in the Kerala basin."),
+        ]),
+        ("Terrain interactions", [
+            ("rain_x_inv_slope",
+             "rainfall / (slope + 1). The same rainfall is more dangerous on "
+             "flat ground that drains slowly."),
+            ("antecedent_x_ruggedness",
+             "15-day antecedent rainfall &#215; ruggedness."),
+            ("elevation_inv",
+             "1 / (elevation + 10). Large for low-lying districts."),
+        ]),
+    ], widths=[8 * mm, 52 * mm, 110 * mm]))
+
+    s.append(P(
+        "The basin one-hot has two columns because this configuration covers "
+        "two basins. Running the pipeline over all 12 basins in "
+        "<font face='Courier'>districts.py</font> produces ten more columns "
+        "and a feature count of 69; nothing else in the list changes.", CAP))
+
+    s.append(P("A.1 &nbsp; What is deliberately excluded", H3))
+    s.append(P(
+        "Columns that exist in the table and are kept out of the model on "
+        "purpose. Listing them matters as much as listing the features: each "
+        "one is a way the model could have cheated.", BODY))
+    s.append(table([
+        ["Column", "Why it is not a feature"],
+        ["<font face='Courier'>lat</font>, <font face='Courier'>lon</font>",
+         "Coordinates would let a tree carve out individual districts and "
+         "memorise their flood history. Location enters only through terrain "
+         "and the basin one-hot."],
+        ["<font face='Courier'>district</font>",
+         "District identity is memorisation dressed up as signal. A model "
+         "using it would collapse the first time it was pointed at a district "
+         "it had never seen."],
+        ["<font face='Courier'>basin</font>, <font face='Courier'>state</font>",
+         "Kept as columns for grouping and reporting. Basin reaches the model "
+         "only as the coarse one-hot above; state never does."],
+        ["<font face='Courier'>date</font>",
+         "A raw timestamp lets a model learn the calendar of the training "
+         "years. Time enters only through the cyclical day-of-year terms."],
+        ["<font face='Courier'>flood_occurred</font>",
+         "Today's label. Feeding it alongside a target built from the same "
+         "series is the most direct leak available."],
+        ["<font face='Courier'>rainfall_mm_was_missing</font><br/>"
+         "<font face='Courier'>river_discharge_m3s_was_missing</font>",
+         "Imputation flags, kept so the share of interpolated rows can be "
+         "reported. They describe the data-collection process, not the "
+         "weather."],
+    ], widths=[52 * mm, 118 * mm]))
 
     s += rule(10, 6)
     s.append(P(
