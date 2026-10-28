@@ -577,13 +577,35 @@ def story():
         "in full, and recall is quoted before precision because recall is the "
         "number that corresponds to people not being warned.", BODY))
 
-    s.append(P("4.4 &nbsp; Calibration", H3))
+    s.append(P("4.4 &nbsp; Calibration &#8212; and the fact that these models have none", H3))
     s.append(P(
-        "Reported as a Brier score plus a ten-bin reliability curve. If the "
-        "model says 30%, floods should begin on roughly 30% of such days. An "
-        "uncalibrated score cannot be acted on by a person, and for this "
-        "system calibration matters more than ranking, because an officer "
-        "responds to the number rather than to the ordering.", BODY))
+        "Reported as a Brier score plus a ten-bin reliability curve. If a "
+        "model says 30%, floods should begin on roughly 30% of such days. "
+        "These models do not clear that bar, and the report says so rather "
+        "than quoting the Brier score and moving on.", BODY))
+    s.append(table([
+        ["", "Logistic", "Random forest", "Always predict zero"],
+        ["Mean predicted risk", "0.269", "0.112", "0.000"],
+        ["Actual onset rate", "0.016", "0.016", "0.016"],
+        ["Over-statement", "16.6&#215;", "6.9&#215;", "&#8212;"],
+        ["Brier score", "0.162", "0.060", "<b>0.016</b>"],
+    ], widths=[46 * mm, 38 * mm, 42 * mm, 44 * mm], align_right=(1, 2, 3)))
+    s.append(P("Measured on the test split, 56,210 district-days.", CAP))
+    s += callout(
+        "What this means, and what it does not",
+        "Both models over-state risk, and both score worse on Brier than a "
+        "model that always predicts zero. So the output is a <b>ranking "
+        "score, not a probability</b>: a reading of 0.30 does not mean a 30% "
+        "chance. It also explains an oddity in the results &#8212; the "
+        "cost-optimal threshold lands at 0.71 rather than near the 1.6% base "
+        "rate, because the threshold is absorbing the inflation. Ranking is "
+        "unaffected, which is why lead time and event detection remain "
+        "meaningful. The fix is to wrap each estimator in "
+        "<font face='Courier'>CalibratedClassifierCV</font> (isotonic, fitted "
+        "on the validation split) before the thresholds are chosen; it is "
+        "recorded as future work rather than half-applied, because it moves "
+        "every number in this document.",
+        accent=colors.HexColor("#1d4ed8"), bg=colors.HexColor("#eff6ff"))
 
     s.append(P("4.5 &nbsp; Results", H3))
     s.append(P("Held-out test split, 2017&#8211;2023, 130 recorded flood "
@@ -613,9 +635,11 @@ def story():
         "Read operationally: <b>logistic regression is the better warning "
         "system here</b>, catching roughly two-thirds of real onsets with a "
         "median of thirteen days' notice, for an alarm on about one "
-        "district-day in seven. The random forest is better calibrated "
-        "(Brier 0.060 against 0.162) and marginally better at ranking "
-        "(ROC-AUC 0.787), but warns half the events at a third of the notice. "
+        "district-day in seven. The random forest has the smaller Brier score "
+        "(0.060 against 0.162) and is marginally better at ranking (ROC-AUC "
+        "0.787), but section 4.4 shows neither model beats the trivial "
+        "baseline on Brier, and the forest warns half the events at a third "
+        "of the notice. "
         "That the simple baseline wins on the metric that matters is a "
         "result worth reporting, not an embarrassment to bury.", BODY))
 
@@ -647,6 +671,49 @@ def story():
         "system is useful for deciding <i>where to look</i>, and is not a "
         "basis for acting alone.", BODY))
 
+    s.append(P("4.7 &nbsp; A case where the model beat the archive", H3))
+    s.append(P(
+        "Kerala, August 2018. The flood peaked on 15&#8211;17 August and "
+        "Thrissur was badly hit. Scoring that week gives:", BODY))
+    s.append(table([
+        ["Thrissur, 2018", "13 Aug", "14 Aug", "15 Aug", "16 Aug", "17 Aug"],
+        ["Rainfall (mm)", "34.7", "80.7", "86.8", "70.3", "33.6"],
+        ["Discharge (m<super>3</super>/s)", "22.3", "45.6", "84.9", "84.1", "70.8"],
+        ["Risk (logistic, alert at 0.71)", "0.556",
+         "<b>0.749</b>", "<b>0.910</b>", "<b>0.802</b>", "0.540"],
+        ["DFO label", "0", "0", "0", "0", "0"],
+    ], widths=[46 * mm, 24 * mm, 25 * mm, 25 * mm, 25 * mm, 25 * mm],
+        align_right=(1, 2, 3, 4, 5)))
+    s.append(P(
+        "The model raised the alarm on 14 August &#8212; two days early "
+        "&#8212; and held it through the peak. Every one of those days was "
+        "scored as a false positive, because the label is zero. Two separate "
+        "failures stack up. <b>First, the event is not in the archive.</b> "
+        "DFO's only Kerala-area event overlapping August 2018 runs "
+        "7&#8211;10 August with 20 fatalities, which is the first wave; the "
+        "catastrophe of 15&#8211;17 August, with a death toll reported in "
+        "the hundreds, has no record. The nearest candidate, an India event "
+        "dated 15 August to 7 September, has its polygon at "
+        "93.7&#8211;95.8&#176;E / 24.9&#8211;27.2&#176;N &#8212; Nagaland "
+        "and Manipur, some 23 degrees away. <b>Second, Thrissur's sample "
+        "point misses the polygon that does exist</b>, falling 0.029&#176; "
+        "&#8212; roughly 3 km &#8212; outside the 7&#8211;10 August "
+        "footprint. Palakkad and Wayanad miss it too.", BODY))
+    s.append(P(
+        "Across the Kerala basin from 11 to 20 August 2018 the model raised "
+        "21 district-day alarms in 7 districts, all scored false. That single "
+        "episode is 0.3% of the logistic model's 7,740 reported false "
+        "positives. The reported precision of 0.06 is therefore "
+        "<b>pessimistic by an unknown amount</b>: some share of what is "
+        "counted against the model is the archive being incomplete rather "
+        "than the model being wrong. The claim is checkable &#8212; the "
+        "labelling is in <font face='Courier'>src/data/loaders.py</font> and "
+        "the GeoPackage is a CC0 download.", BODY))
+    s.append(P(
+        "The random forest peaked at 0.017 that week against its own 0.46 "
+        "threshold, missing the largest flood in the record completely. That "
+        "is why the console defaults to logistic regression.", BODY))
+
     # ================= 5. LIMITATIONS =================
     # Keep the heading with its table: it was orphaning at a page foot.
     s.append(KeepTogether([
@@ -663,6 +730,13 @@ def story():
         ["DFO records only large events",
          "Smaller, locally significant floods are absent from the labels and "
          "count as negatives"],
+        ["The archive misses events outright &#8212; the Kerala flood of "
+         "15&#8211;17 August 2018 is not in it (section 4.7)",
+         "Reported precision is pessimistic by an unknown amount, because "
+         "some false alarms are real floods with no record"],
+        ["Model outputs are not calibrated probabilities (section 4.4)",
+         "A score of 0.30 is not a 30% chance. Ranking, lead time and event "
+         "detection hold; the numeric values do not"],
         ["The live feed is analysis and forecast; the model was trained on "
          "reanalysis",
          "Train/serve skew. Live output carries more uncertainty than the "

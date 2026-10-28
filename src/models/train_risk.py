@@ -8,9 +8,28 @@ Flood-risk classification: train and compare three models.
   3. XGBoost
 
 All three are trained on the SAME chronological split and the SAME
-features, so the comparison is fair. Probabilities are calibrated on
-the validation split (see calibrate.py) because an uncalibrated
-probability cannot be acted on by a human.
+features, so the comparison is fair.
+
+THE OUTPUT IS NOT A CALIBRATED PROBABILITY
+------------------------------------------
+An earlier version of this docstring claimed the probabilities were
+calibrated on the validation split, and pointed at a calibrate.py that
+was never written. They are not, and it was not. Measured on the test
+split: mean predicted risk is 0.269 for logistic regression and 0.112
+for the random forest, against an actual onset rate of 0.016 — they
+over-state by roughly 16x and 7x. Both score worse on Brier (0.162 and
+0.060) than a model that always predicts zero (0.016), which is what an
+uncalibrated classifier looks like at this base rate.
+
+So treat the output as a RANKING SCORE, not a probability. It is why the
+cost-optimal alert threshold lands at 0.71 rather than anywhere near the
+base rate: the threshold is absorbing the inflation.
+
+The proper fix is to wrap each estimator in CalibratedClassifierCV
+(isotonic, fitted on the validation split) before the thresholds are
+chosen. That changes every number in the report, so it is recorded as
+future work here rather than half-applied — but nothing in this file
+should be read as claiming it has been done.
 
 Usage
 -----

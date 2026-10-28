@@ -287,6 +287,61 @@ Also deliberate:
 
 ---
 
+## The case where the model beat the archive
+
+Worth knowing before anyone asks why precision is 6%.
+
+Kerala, August 2018. The flood peaked on 15–17 August; Thrissur was badly
+hit. Score that week and the logistic model gives Thrissur **0.749 on the
+14th, 0.910 on the 15th, 0.802 on the 16th**, against an alert threshold of
+0.71. It raised the alarm two days early and held it through the peak.
+Discharge went from 21 to 85 m3/s in two days.
+
+The label for every one of those days is **0**, so every one of those alarms
+was counted as a false positive.
+
+Two separate failures stack up:
+
+1. **The event is not in the archive.** DFO's only Kerala-area event
+   overlapping August 2018 runs 7–10 August with 20 fatalities — the first
+   wave. The catastrophe of 15–17 August, with a death toll reported in the
+   hundreds, has no record. The nearest candidate, an India event dated
+   15 Aug – 7 Sep, has its polygon at 93.7–95.8E / 24.9–27.2N — Nagaland and
+   Manipur, about 23 degrees away.
+2. **Thrissur's point misses the polygon that does exist.** For the 7–10
+   August event, the district's sample point falls 0.029 degrees — roughly
+   3 km — outside the footprint. Palakkad and Wayanad miss it too.
+
+Across the Kerala basin, 11–20 August 2018, the model raised 21 district-day
+alarms in 7 districts, all scored false. That one episode is 0.3% of the
+logistic model's 7,740 reported false positives.
+
+**What this means for the numbers.** The reported precision of 0.06 is
+*pessimistic by an unknown amount*, because an unknown share of the false
+alarms are real floods the archive does not record. That is a much stronger
+thing to say than "precision is low because of the cost ratio", and it is
+checkable: `src/data/loaders.py` does the labelling, and the GeoPackage is a
+CC0 download anyone can inspect.
+
+Reproduce it:
+
+```bash
+python - <<'PY'
+import pickle, pandas as pd
+d = pd.read_parquet("data/processed/features_h1.parquet")
+b = pickle.load(open("outputs/models/risk_logistic_h1.pkl", "rb"))
+d["risk"] = b["model"].predict_proba(d[b["features"]])[:, 1]
+w = d[(d.district == "Thrissur") & (d.date >= "2018-08-13") & (d.date <= "2018-08-17")]
+print(w[["date", "rainfall_mm", "river_discharge_m3s", "risk", "flood_occurred"]])
+PY
+```
+
+The random forest, for the record, peaked at **0.017** that week against its
+own 0.46 threshold. It missed the largest flood in the record completely,
+which is why the dashboard defaults to logistic regression.
+
+---
+
 ## Team split (4 people, all start week 1)
 
 | Owner | Module | Files |
