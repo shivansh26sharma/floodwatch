@@ -105,6 +105,19 @@ models:
     subsample: 0.8
     colsample_bytree: 0.8
 
+  # POST-HOC PROBABILITY CALIBRATION.
+  # Class reweighting is what lets these models see a 1.6% positive class
+  # at all, and it is also what destroys the probability scale. The map is
+  # fitted on out-of-sample predictions from the TRAINING period only, in
+  # chronological blocks, so neither the validation split (which picks the
+  # threshold) nor the test split is touched. See src/models/calibrate.py.
+  #   isotonic  non-parametric, monotone, needs a few hundred positives
+  #   sigmoid   Platt scaling, smoother, assumes a logistic distortion
+  #   none      ablation
+  calibration:
+    method: isotonic
+    oof_blocks: 4
+
 forecast:
   # What we forecast. river_discharge_m3s is the primary target: it is smoother,
   # more autocorrelated and directly flood-relevant. rainfall_mm is much

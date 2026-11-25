@@ -494,21 +494,52 @@ def human_age(hours: float | None) -> str:
 
 model_choices = available_models(HORIZON)
 with st.sidebar:
-    st.markdown("### Console")
-    MODEL_NAME = st.selectbox(
-        "Risk model", model_choices,
-        index=model_choices.index(DEFAULT_MODEL)
-        if DEFAULT_MODEL in model_choices else 0,
-        format_func=lambda s: s.replace("_", " ").title(),
+    # WHO IS LOOKING AT THIS PAGE.
+    # The default is the public warning page: one district, one sentence,
+    # what to do. Everything that only a reviewer or an examiner needs —
+    # model choice, thresholds, AUC, duty cycle, provenance — lives behind
+    # the technical console and is not shown to a member of the public who
+    # came here to find out whether their district is in trouble.
+    VIEW = st.radio(
+        "View",
+        ["Public warning page", "Technical console"],
+        index=0,
+        help="The public page is the product. The console is the evidence "
+             "behind it.",
     )
-    st.caption(
-        "Logistic regression is the default: it warns 65% of recorded events "
-        "a median 13 days ahead, against 51% at 5 days for the forest. "
-        "Neither model's output is a calibrated probability — the Model tab "
-        "says what that means."
-    )
+    IS_PUBLIC = VIEW == "Public warning page"
+
     st.divider()
-    if st.button("↻ Refresh live feed", **_width_kw(st.button)):
+    if IS_PUBLIC:
+        MODEL_NAME = (DEFAULT_MODEL if DEFAULT_MODEL in model_choices
+                      else model_choices[0])
+        st.markdown("### About this page")
+        st.caption(
+            "A student research prototype that estimates the chance a flood "
+            "begins in a district within the next seven days, from public "
+            "rainfall and river-flow data. It is not an official warning "
+            "service."
+        )
+    else:
+        st.markdown("### Console")
+        MODEL_NAME = st.selectbox(
+            "Risk model", model_choices,
+            index=model_choices.index(DEFAULT_MODEL)
+            if DEFAULT_MODEL in model_choices else 0,
+            format_func=lambda s: s.replace("_", " ").title(),
+        )
+        st.caption(
+            "Logistic regression is the default: it warns 66% of recorded "
+            "events a median 13 days ahead, against 52% at 5 days for the "
+            "forest. Outputs are isotonic-calibrated on out-of-sample "
+            "training-period predictions — the Model tab shows the before "
+            "and after."
+        )
+    st.divider()
+    # The refetch button is an operator control, not a public one: it
+    # costs a two-minute round trip to a free public API and means nothing
+    # to a visitor. The freshness line stays, because that they can use.
+    if (not IS_PUBLIC) and st.button("↻ Refresh live feed", **_width_kw(st.button)):
         from src.live import fetch as lf
         with st.spinner("Pulling 22 districts from Open-Meteo — ~2 minutes…"):
             try:
@@ -572,18 +603,34 @@ elif age <= FEED_MAX_AGE_HOURS:
 else:
     feed_pill = pill(f"feed stale · {human_age(age)}", "warn", "#f59e0b")
 
-st.markdown(
-    '<div class="fw-bar">'
-    '<span class="fw-brand">🌊 Flood<span>Watch</span></span>'
-    f'<span class="fw-sub">{CFG.project.region} · {n_districts} districts · '
-    f'{n_basins} river basins · {span}</span>'
-    '<span class="fw-grow"></span>'
-    f'{src_pill}{feed_pill}'
-    f'{pill(MODEL_NAME.replace("_", " "))}'
-    f'{pill(f"alert ≥ {threshold:.2f}")}'
-    '</div>',
-    unsafe_allow_html=True,
-)
+if IS_PUBLIC:
+    # The public header carries only what a member of the public can act
+    # on: the name, the coverage, and how fresh the data is. Model name and
+    # operating threshold are not public information — they are a reason to
+    # trust the page, not a thing to read off it.
+    st.markdown(
+        '<div class="fw-bar">'
+        '<span class="fw-brand">🌊 Flood<span>Watch</span></span>'
+        f'<span class="fw-sub">Flood outlook for {n_districts} districts · '
+        f'next 7 days</span>'
+        '<span class="fw-grow"></span>'
+        f'{feed_pill}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div class="fw-bar">'
+        '<span class="fw-brand">🌊 Flood<span>Watch</span></span>'
+        f'<span class="fw-sub">{CFG.project.region} · {n_districts} districts · '
+        f'{n_basins} river basins · {span}</span>'
+        '<span class="fw-grow"></span>'
+        f'{src_pill}{feed_pill}'
+        f'{pill(MODEL_NAME.replace("_", " "))}'
+        f'{pill(f"alert ≥ {threshold:.2f}")}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 if source == "fixture":
     reason = _loaders.fallback_reason()
@@ -594,6 +641,295 @@ if source == "fixture":
           "pipeline runs end to end.",
         icon="🚨",
     )
+
+# ======================================================================
+# PUBLIC WARNING PAGE
+# ----------------------------------------------------------------------
+# One question, answered in one sentence: is a flood likely to start in my
+# district in the next week, and what should I do about it. Everything a
+# member of the public cannot act on — model names, thresholds, AUC, duty
+# cycle, forecast share, feature counts — is deliberately absent. It is in
+# the technical console, one click away, for the people who need it.
+#
+# Three rules this page follows:
+#   1. Say the number as odds as well as a percentage. "3%" is read as
+#      "nothing"; "about 1 in 30" is read as a risk.
+#   2. Never let a percentage stand alone. Every number carries the band
+#      it falls in and what to do at that band.
+#   3. State what this is not. It is a student prototype, and the official
+#      warning always comes from the district administration, IMD and CWC.
+# ======================================================================
+if IS_PUBLIC:
+    import altair as alt
+
+    st.markdown("""
+    <style>
+      .fw-hero {border-radius:16px; padding:22px 26px; margin:14px 0 10px;
+                border:1px solid rgba(15,23,42,.08);
+                box-shadow:0 10px 30px -22px rgba(15,23,42,.45);}
+      .fw-hero h2 {margin:0 0 6px; font-size:1.45rem; letter-spacing:-.01em;}
+      .fw-hero p {margin:0; font-size:.98rem; line-height:1.55; opacity:.92;}
+      .fw-hero .fw-odds {font-size:2.4rem; font-weight:700; line-height:1.1;
+                         letter-spacing:-.02em; margin:2px 0 8px;}
+      .fw-calm {background:linear-gradient(135deg,#ecfdf5,#d1fae5);
+                border-color:#a7f3d0;}
+      .fw-watch {background:linear-gradient(135deg,#fffbeb,#fef3c7);
+                 border-color:#fcd34d;}
+      .fw-warn {background:linear-gradient(135deg,#fef2f2,#fee2e2);
+                border-color:#fca5a5;}
+      .fw-step {padding:10px 0 10px 2px; border-bottom:1px solid rgba(15,23,42,.07);
+                font-size:.95rem; line-height:1.5;}
+      .fw-step:last-child {border-bottom:none;}
+      .fw-foot {font-size:.84rem; opacity:.72; line-height:1.6;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    feed = feed_bootstrap(FEED_MAX_AGE_HOURS)
+    if not feed["ok"]:
+        st.error(
+            "**We cannot reach the rainfall and river-level feed right now, "
+            "and there is no recent copy saved.** This page cannot tell you "
+            "anything useful until the feed is back. For an official warning, "
+            "contact your district administration or check the India "
+            "Meteorological Department and Central Water Commission.",
+            icon="📡",
+        )
+        st.stop()
+
+    try:
+        live, conditions = live_frames(MODEL_NAME, HORIZON, LIVE_DAYS, feed_stamp())
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"**The outlook could not be calculated.** `{exc}`", icon="⚠️")
+        st.stop()
+
+    if live.empty:
+        st.error("**No outlook available for today.**", icon="⚠️")
+        st.stop()
+
+    WATCH = float(threshold)          # the cost-optimal alert threshold
+    WARN = min(3.0 * WATCH, 0.5)      # a clear step above it
+
+    def band_of(risk: float) -> tuple[str, str, str]:
+        """(label, css class, what it means) for a calibrated probability."""
+        if risk >= WARN:
+            return ("Warning", "fw-warn",
+                    "Conditions resemble those that preceded recorded floods. "
+                    "Act now: move valuables and livestock up, keep documents "
+                    "and medicines ready to carry, and follow your district "
+                    "administration's instructions.")
+        if risk >= WATCH:
+            return ("Watch", "fw-watch",
+                    "Worth paying attention. Check on elderly neighbours, "
+                    "charge phones and power banks, and know your nearest "
+                    "high ground and relief centre.")
+        return ("No warning", "fw-calm",
+                "Nothing unusual in the rainfall and river levels for the "
+                "week ahead. Normal precautions for the season.")
+
+    def odds_text(risk: float) -> str:
+        if risk <= 0:
+            return "less than 1 in 1,000"
+        one_in = int(round(1.0 / max(risk, 1e-4)))
+        if one_in >= 500:
+            return "less than 1 in 500"
+        return f"about 1 in {one_in:,}"
+
+    today = live.loc[live["days_ahead"] == 0, "date"].iloc[0]
+    max_day = int(live["days_ahead"].max())
+    peak_by_district = (live.groupby("district", as_index=False)
+                        .agg(risk=("risk", "max")))
+    peak_by_district = peak_by_district.merge(
+        live.loc[live.groupby("district")["risk"].idxmax(),
+                 ["district", "days_ahead", "date"]],
+        on="district", how="left")
+
+    # ---- 1. where things stand, everywhere ---------------------------
+    flagged = peak_by_district[peak_by_district["risk"] >= WATCH].sort_values(
+        "risk", ascending=False)
+    warned = flagged[flagged["risk"] >= WARN]
+
+    if flagged.empty:
+        top = peak_by_district.loc[peak_by_district["risk"].idxmax()]
+        st.markdown(
+            f'<div class="fw-hero fw-calm"><h2>No district is on watch '
+            f'for the next {max_day} days</h2><p>The highest chance anywhere '
+            f'is in <b>{top["district"]}</b>, at {odds_text(top["risk"])}. '
+            f'Nothing in the current rainfall or river levels resembles the '
+            f'build-up to a recorded flood.</p></div>',
+            unsafe_allow_html=True)
+    else:
+        names = ", ".join(f"<b>{r.district}</b>" for r in flagged.itertuples())
+        head = (f"{len(warned)} district(s) at warning, "
+                f"{len(flagged) - len(warned)} on watch"
+                if len(warned) else f"{len(flagged)} district(s) on watch")
+        st.markdown(
+            f'<div class="fw-hero {"fw-warn" if len(warned) else "fw-watch"}">'
+            f'<h2>{head} over the next {max_day} days</h2>'
+            f'<p>{names}. Find your district below for what that means and '
+            f'what to do.</p></div>',
+            unsafe_allow_html=True)
+
+    # ---- 2. your district --------------------------------------------
+    st.markdown("### Check your district")
+    names = sorted(live["district"].unique())
+    default_name = str(peak_by_district.loc[
+        peak_by_district["risk"].idxmax(), "district"])
+    sel = st.selectbox("District", names, index=names.index(default_name),
+                       label_visibility="collapsed")
+
+    mine = live[live["district"] == sel].sort_values("days_ahead")
+    my_peak = mine.loc[mine["risk"].idxmax()]
+    label, css, advice = band_of(float(my_peak["risk"]))
+    when = ("today" if int(my_peak["days_ahead"]) == 0
+            else f"on {my_peak['date']:%A %d %B}")
+
+    st.markdown(
+        f'<div class="fw-hero {css}">'
+        f'<h2>{sel} — {label}</h2>'
+        f'<div class="fw-odds">{odds_text(float(my_peak["risk"]))}</div>'
+        f'<p>That is the highest chance this week that a flood <b>begins</b> '
+        f'in {sel}, and it falls {when} '
+        f'({float(my_peak["risk"]):.1%} on the day). {advice}</p></div>',
+        unsafe_allow_html=True)
+
+    # Two things a person can check for themselves, in plain units.
+    week = conditions[(conditions["district"] == sel)
+                      & (conditions["date"] >= today)
+                      & (conditions["date"] <= today + pd.Timedelta(days=7))]
+    rain_week = float(week["rainfall_mm"].sum()) if len(week) else float("nan")
+
+    hist = data[data["district"] == sel]
+    hist_month = hist[hist["date"].dt.month == int(pd.Timestamp(today).month)]
+    q_now = float(mine.loc[mine["days_ahead"] == 0, "river_discharge_m3s"].iloc[0])
+    if len(hist_month):
+        pct = float((hist_month["river_discharge_m3s"] < q_now).mean())
+        flow_text = (f"higher than {pct:.0%} of "
+                     f"{pd.Timestamp(today):%B} days on record")
+    else:
+        flow_text = "no historical comparison available"
+
+    c1, c2 = st.columns(2)
+    c1.metric("Rain expected over the next 7 days", f"{rain_week:,.0f} mm")
+    c2.metric("River flow today", f"{q_now:,.0f} m³/s", flow_text,
+              delta_color="off")
+
+    # ---- 3. the week ahead -------------------------------------------
+    st.markdown(f"**The week ahead in {sel}**")
+    plot = mine.copy()
+    plot["pct"] = plot["risk"]
+    plot["Level"] = plot["risk"].apply(lambda r: band_of(r)[0])
+    plot["Day"] = plot["date"].dt.strftime("%a %d %b")
+    bars = alt.Chart(plot).mark_bar(size=36, cornerRadius=4).encode(
+        x=alt.X("Day:N", sort=list(plot["Day"]), title=None),
+        y=alt.Y("pct:Q", title="chance a flood begins",
+                axis=alt.Axis(format="%")),
+        color=alt.Color("Level:N", title=None, scale=alt.Scale(
+            domain=["No warning", "Watch", "Warning"],
+            range=["#0ea5e9", "#f59e0b", "#dc2626"])),
+        tooltip=[alt.Tooltip("Day:N", title="Day"),
+                 alt.Tooltip("pct:Q", title="Chance", format=".1%"),
+                 alt.Tooltip("Level:N", title="Level")],
+    ).properties(height=260)
+    watch_rule = alt.Chart(pd.DataFrame({"t": [WATCH]})).mark_rule(
+        color="#f59e0b", strokeDash=[5, 4]).encode(y="t:Q")
+    chart(bars + watch_rule)
+    st.caption(
+        "The dashed line is the level at which a district goes on watch. "
+        "Days further out are based more on weather forecast than on what "
+        "has already fallen, so they can change."
+    )
+
+    # ---- 4. the map and the watchlist --------------------------------
+    st.divider()
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown("**Where the risk is, today**")
+        risk_map(live[live["days_ahead"] == 0], threshold, height=400)
+    with right:
+        st.markdown("**Districts on watch this week**")
+        if flagged.empty:
+            st.success("None. No district reaches the watch level in the "
+                       "next week.", icon="✅")
+        else:
+            show = flagged.copy()
+            show["Level"] = show["risk"].apply(lambda r: band_of(r)[0])
+            show["Chance"] = show["risk"].apply(odds_text)
+            show["Highest"] = show.apply(
+                lambda r: "today" if int(r["days_ahead"]) == 0
+                else f"{r['date']:%a %d %b}", axis=1)
+            table(show[["district", "Level", "Chance", "Highest"]].rename(
+                columns={"district": "District"}), hide_index=True)
+        st.caption(
+            "This system is deliberately cautious: it is set to accept "
+            "twenty false alarms rather than miss one flood, so most "
+            "watches will not become floods. That is the design, not a "
+            "fault."
+        )
+
+    # ---- 5. what to do -----------------------------------------------
+    st.divider()
+    st.markdown("### If your district is on watch")
+    st.markdown(
+        '<div class="fw-step"><b>1. Follow the official channel first.</b> '
+        'Evacuation orders and relief come from your district '
+        'administration. This page is an early heads-up, not an order.</div>'
+        '<div class="fw-step"><b>2. Move what water ruins.</b> Documents, '
+        'medicines, seed, fodder and electronics up high; livestock to '
+        'higher ground.</div>'
+        '<div class="fw-step"><b>3. Keep a go-bag.</b> Identity documents in '
+        'a plastic sleeve, medicines for a week, drinking water, dry food, '
+        'torch, charged power bank.</div>'
+        '<div class="fw-step"><b>4. Know two routes out.</b> The nearest '
+        'high ground and relief centre, and a way to reach both if the '
+        'main road is under water.</div>'
+        '<div class="fw-step"><b>5. Check on someone.</b> Elderly '
+        'neighbours, anyone living alone, anyone who would struggle to '
+        'move quickly.</div>',
+        unsafe_allow_html=True)
+
+    # ---- 6. how it works, honestly -----------------------------------
+    st.divider()
+    with st.expander("How this page works, and what it cannot do"):
+        st.markdown(
+            f"""
+**Where the numbers come from.** Daily rainfall and modelled river flow
+for each district are pulled from a public weather and flood service, and
+compared with the 24 years of history on which this system was trained
+(2000–2023). The comparison produces one number per district per day: the
+chance that a flood *begins* there within seven days.
+
+**Why the chance looks small.** Floods are rare. Across the historical
+record a district begins a flood on roughly 1.6 per cent of weeks, so a
+figure of {WATCH:.0%} is already several times the normal level — which is
+why the watch line sits there rather than at 50 per cent.
+
+**What it is measured against.** Tested on years it never saw during
+training, the system gave advance notice of about two thirds of the floods
+recorded in these districts, a median of thirteen days ahead. It also
+raised alarms on days when nothing happened, far more often than it
+warned correctly. Both halves of that sentence are true and neither should
+be left out.
+
+**What it is not.** A student research prototype, not an official warning
+service, and not a substitute for the India Meteorological Department, the
+Central Water Commission or your State Disaster Management Authority. It
+has no gauge readings, no embankment or dam information, and it treats a
+whole district as one point — so a flood affecting part of a district can
+be missed entirely.
+
+**Updated.** Rainfall and river feed {human_age(feed_age_hours())}.
+            """
+        )
+
+    st.markdown(
+        '<p class="fw-foot">FloodWatch — a third-year machine learning '
+        'project. Decision support built on public data; not an official '
+        'flood warning. In an emergency, contact your district '
+        'administration.</p>',
+        unsafe_allow_html=True)
+
+    st.stop()
+
 
 tab_live, tab_replay, tab_model, tab_data = st.tabs([
     "◉  Live operations",

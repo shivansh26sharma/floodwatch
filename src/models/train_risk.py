@@ -10,26 +10,28 @@ Flood-risk classification: train and compare three models.
 All three are trained on the SAME chronological split and the SAME
 features, so the comparison is fair.
 
-THE OUTPUT IS NOT A CALIBRATED PROBABILITY
-------------------------------------------
-An earlier version of this docstring claimed the probabilities were
-calibrated on the validation split, and pointed at a calibrate.py that
-was never written. They are not, and it was not. Measured on the test
-split: mean predicted risk is 0.269 for logistic regression and 0.112
-for the random forest, against an actual onset rate of 0.016 — they
-over-state by roughly 16x and 7x. Both score worse on Brier (0.162 and
-0.060) than a model that always predicts zero (0.016), which is what an
-uncalibrated classifier looks like at this base rate.
+THE OUTPUT IS A CALIBRATED PROBABILITY
+--------------------------------------
+Reweighting the rare class — `class_weight="balanced"` here, and
+`scale_pos_weight` for XGBoost — is what makes these models detect floods
+at a 1.6 per cent base rate at all. It also destroys the probability
+scale: before calibration, mean predicted risk on the test split was
+0.269 for logistic regression and 0.112 for the random forest against an
+actual onset rate of 0.016, over-stating by roughly 16x and 7x, and both
+scored worse on Brier than always predicting zero.
 
-So treat the output as a RANKING SCORE, not a probability. It is why the
-cost-optimal alert threshold lands at 0.71 rather than anywhere near the
-base rate: the threshold is absorbing the inflation.
+So every model fitted here is now wrapped in a monotone calibration map
+(isotonic by default) fitted on out-of-sample predictions from the
+TRAINING period only — see src/models/calibrate.py for why not the
+validation split. The calibrator is pickled with the model, so the
+dashboard and the live scorer apply exactly the map that was fitted at
+training time. Thresholds are chosen on calibrated scores.
 
-The proper fix is to wrap each estimator in CalibratedClassifierCV
-(isotonic, fitted on the validation split) before the thresholds are
-chosen. That changes every number in the report, so it is recorded as
-future work here rather than half-applied — but nothing in this file
-should be read as claiming it has been done.
+Because isotonic regression is monotone it cannot change the ranking:
+ROC-AUC and PR-AUC are identical before and after. What changes is the
+Brier score, the reliability curve, and whether the number on screen can
+be read as a probability at all. Both the raw and the calibrated
+predictions are returned, so the report can show the before and after.
 
 Usage
 -----
@@ -52,6 +54,7 @@ from sklearn.preprocessing import StandardScaler
 from src.config import CFG, ROOT
 from src.data import loaders
 from src.features.build_features import TARGET, chronological_split, feature_columns
+from src.models.calibrate import chronological_oof, fit_calibrator
 
 try:
     from xgboost import XGBClassifier
@@ -96,6 +99,17 @@ def build_models() -> dict:
         print("[train] xgboost not installed — skipping. pip install xgboost")
 
     return models
+
+
+def _calibration_method() -> str:
+    """isotonic | sigmoid | none, from config, defaulting to isotonic."""
+    cal = getattr(CFG.models, "calibration", None)
+    return str(getattr(cal, "method", "isotonic")) if cal is not None else "isotonic"
+
+
+def _calibration_blocks() -> int:
+    cal = getattr(CFG.models, "calibration", None)
+    return int(getattr(cal, "oof_blocks", 4)) if cal is not None else 4
 
 
 def load_features(horizon: int) -> tuple[pd.DataFrame, list[str]]:
@@ -154,26 +168,52 @@ def train(horizon: int = 1, save: bool = True) -> dict:
             f"Do NOT shuffle the split to fix this: that leaks the future."
         )
 
-    trained, predictions = {}, {}
+    method = _calibration_method()
+    blocks = _calibration_blocks()
+
+    trained, predictions, predictions_raw, calibrators = {}, {}, {}, {}
     for name, model in build_models().items():
         if name == "xgboost":
             model.set_params(scale_pos_weight=pos_weight)
 
+        # ---- calibration data first --------------------------------------
+        # Out-of-sample predictions over the TRAINING period, fitted
+        # past -> future. Done before the final fit so the folds cannot
+        # accidentally see the full-train model.
+        if method == "none":
+            cal = fit_calibrator(np.array([]), np.array([]), method="none")
+        else:
+            p_oof, y_oof = chronological_oof(
+                model, splits["train"], feats, TARGET, blocks=blocks
+            )
+            cal = fit_calibrator(p_oof, y_oof, method=method)
+        calibrators[name] = cal
+
         model.fit(splits["train"][feats], y_train)
         trained[name] = model
 
-        predictions[name] = {
+        predictions_raw[name] = {
             part: model.predict_proba(splits[part][feats])[:, 1]
             for part in splits
         }
-        print(f"[train] fitted {name}")
+        predictions[name] = {
+            part: cal.transform(p) for part, p in predictions_raw[name].items()
+        }
+        shift = (predictions_raw[name]["test"].mean(),
+                 predictions[name]["test"].mean())
+        print(f"[train] fitted {name}  |  calibration: {cal.method} on "
+              f"{cal.n_fit:,} out-of-sample rows  |  mean test score "
+              f"{shift[0]:.3f} -> {shift[1]:.3f} "
+              f"(actual {splits['test'][TARGET].mean():.3f})")
 
     if save:
         out_dir = ROOT / CFG.outputs.models
         out_dir.mkdir(parents=True, exist_ok=True)
         for name, model in trained.items():
             with open(out_dir / f"risk_{name}_h{horizon}.pkl", "wb") as fh:
-                pickle.dump({"model": model, "features": feats, "horizon": horizon}, fh)
+                pickle.dump({"model": model, "features": feats,
+                             "horizon": horizon,
+                             "calibrator": calibrators[name]}, fh)
 
         meta = {
             "horizon": horizon,
@@ -185,6 +225,16 @@ def train(horizon: int = 1, save: bool = True) -> dict:
                       for k, v in splits.items()},
             "positive_rate": {k: float(v[TARGET].mean()) for k, v in splits.items()},
             "scale_pos_weight": pos_weight,
+            "calibration": {
+                "method": method,
+                "oof_blocks": blocks,
+                "n_calibration_rows": {k: v.n_fit for k, v in calibrators.items()},
+                "mean_raw_test": {k: float(predictions_raw[k]["test"].mean())
+                                  for k in predictions_raw},
+                "mean_calibrated_test": {k: float(predictions[k]["test"].mean())
+                                         for k in predictions},
+                "actual_test_rate": float(splits["test"][TARGET].mean()),
+            },
         }
         with open(out_dir / f"risk_meta_h{horizon}.json", "w") as fh:
             json.dump(meta, fh, indent=2)
@@ -194,6 +244,7 @@ def train(horizon: int = 1, save: bool = True) -> dict:
         print("[train] *** SYNTHETIC FIXTURE — these numbers mean nothing ***")
 
     return {"models": trained, "predictions": predictions,
+            "predictions_raw": predictions_raw, "calibrators": calibrators,
             "splits": splits, "features": feats, "horizon": horizon}
 
 

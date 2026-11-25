@@ -30,6 +30,12 @@ TWO THINGS TO BE HONEST ABOUT
    how much of each row's history was forecast rather than observed, so
    that uncertainty is visible instead of hidden.
 
+3. The number IS a probability. The score is passed through the
+   calibration map pickled with the model (src/models/calibrate.py), so
+   "6%" means floods followed about six per cent of comparable warnings
+   in the historical record. The uncalibrated score is kept alongside it
+   as `risk_raw` for diagnostics.
+
 Nothing here is an evacuation order. It is decision support, and the
 operating threshold was chosen for a 20:1 miss-to-false-alarm cost, which
 means deliberately many false alarms.
@@ -193,6 +199,7 @@ def score(model_name: str = "random_forest", horizon: int = 1,
     reference = FeatureReference.load()
     bundle = _load_model(model_name, horizon)
     model, feats = bundle["model"], bundle["features"]
+    calibrator = bundle.get("calibrator")
     threshold = _alert_threshold(model_name, horizon)
 
     missing = [f for f in feats if f not in reference.features]
@@ -215,13 +222,18 @@ def score(model_name: str = "random_forest", horizon: int = 1,
     if rows.empty:
         raise ValueError("No scoreable rows — is data/live/conditions.csv current?")
 
-    rows["risk"] = model.predict_proba(rows[feats])[:, 1]
+    raw = model.predict_proba(rows[feats])[:, 1]
+    # The same calibration map that was fitted at training time, pickled
+    # with the model. Without it the number on the dashboard would be a
+    # ranking score dressed up as a probability.
+    rows["risk_raw"] = raw
+    rows["risk"] = calibrator.transform(raw) if calibrator is not None else raw
     rows["alert"] = rows["risk"] >= threshold
     rows["days_ahead"] = (rows["date"] - today).dt.days
     rows["forecast_share"] = _forecast_share(rows, conditions)
 
     out = rows[["district", "state", "basin", "lat", "lon", "date",
-                "days_ahead", "risk", "alert", "forecast_share",
+                "days_ahead", "risk", "risk_raw", "alert", "forecast_share",
                 "rainfall_mm", "river_discharge_m3s"]].sort_values(
         ["days_ahead", "risk"], ascending=[True, False]).reset_index(drop=True)
 

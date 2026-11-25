@@ -27,14 +27,34 @@ keep further out. Say so. It is a better report than a hidden failure.
 
 MODELS
 ------
-  persistence   naive baseline
-  climatology   day-of-year mean, fitted on train only
-  arima         statsmodels SARIMAX, fitted once on train then advanced
-                through the test period with append(refit=False) so each
-                forecast origin only ever sees past observations
-  lstm          PyTorch, multivariate input window -> direct h-step vector
-                output, one global model across districts with per-district
-                standardisation fitted on train only
+  persistence     naive baseline
+  climatology     day-of-year mean, fitted on train only
+  seasonal_naive  y_hat(t+h) = y(t+h-365): last year's value on the same
+                  calendar day. On a strongly monsoonal series this is a
+                  much harder baseline than climatology, because it keeps
+                  the shape of a real year instead of averaging it away.
+  ridge_ar        direct multi-horizon ridge regression on the last 14
+                  lags plus day-of-year harmonics, one global model per
+                  horizon, per-district standardisation fitted on train
+                  only. The cheap learned model: if ARIMA or an LSTM
+                  cannot beat this, they are not earning their complexity.
+  arima           statsmodels SARIMAX, fitted once per district on train
+                  then advanced through the test period WITHOUT refitting,
+                  so each forecast origin only ever sees past observations
+  lstm            PyTorch, multivariate input window -> direct h-step
+                  vector output, one global model across districts with
+                  per-district standardisation fitted on train only
+
+WHY ARIMA USED TO NEVER FINISH
+------------------------------
+The first version advanced the state with `append(..., refit=False)` once
+per day. `append` re-filters the entire series from the beginning on every
+call, so walking 3,287 test days per district costs O(n^2) Kalman passes —
+it ran for over an hour on 22 districts without completing. `extend`
+continues from the existing filtered state instead, which is what the
+walk-forward loop actually needs: the same forecasts, in about a second
+per district. Origins are additionally strided (default: weekly) because
+daily origins on a smooth series add cost without adding information.
 
 A NOTE ON MAPE
 --------------
@@ -177,21 +197,28 @@ def climatology(panel: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
 # ARIMA
 # ======================================================================
 
-def run_arima(panel: pd.DataFrame, target: str, horizons: list[int]) -> pd.DataFrame:
+def run_arima(panel: pd.DataFrame, target: str, horizons: list[int],
+              stride: int | None = None) -> pd.DataFrame:
     """Fit once per district on train, then walk forward without refitting.
 
-    `append(..., refit=False)` extends the filtered state with each new
-    observation, so the forecast made at origin t has only ever seen data
-    up to t. Refitting at every origin would be more rigorous and is far
-    too slow for 8 districts x 2 years; this is the standard compromise
-    and you should say so in the report.
+    The state is advanced with `extend`, which continues from the existing
+    filtered state, rather than `append`, which re-filters the whole series
+    on every call (see the module docstring: that is why the first version
+    never finished). The forecast made at origin t has only ever seen
+    observations up to t either way.
+
+    Refitting the parameters at every origin would be more rigorous and is
+    far too slow; fitting once on train and holding the parameters fixed is
+    the standard compromise and is stated as such in the report.
     """
     if not HAS_SM:
         print("[forecast] statsmodels missing — skipping ARIMA")
         return pd.DataFrame()
 
+    stride = int(stride or max(horizons))
     train_end, _ = split_dates()
     order = tuple(CFG.forecast.arima_order)
+    h_max = max(horizons)
     rows = []
 
     for district, grp in panel.groupby("district"):
@@ -201,7 +228,7 @@ def run_arima(panel: pd.DataFrame, target: str, horizons: list[int]) -> pd.DataF
 
         train = series[series.index <= train_end.to_period("D")]
         rest = series[series.index > train_end.to_period("D")]
-        if len(train) < 100 or len(rest) < max(horizons) + 1:
+        if len(train) < 100 or len(rest) < h_max + 1:
             continue
 
         try:
@@ -215,8 +242,9 @@ def run_arima(panel: pd.DataFrame, target: str, horizons: list[int]) -> pd.DataF
 
         rest_values = rest.to_numpy()
         rest_index = rest.index
-        for i in range(len(rest_values) - max(horizons)):
-            fc = res.forecast(steps=max(horizons))
+        n_origins = 0
+        for i in range(0, len(rest_values) - h_max, stride):
+            fc = np.asarray(res.forecast(steps=h_max))
             origin_date = rest_index[i].to_timestamp()
             for h in horizons:
                 rows.append({
@@ -224,14 +252,106 @@ def run_arima(panel: pd.DataFrame, target: str, horizons: list[int]) -> pd.DataF
                     "date": origin_date,
                     "horizon": h,
                     "y_true": float(rest_values[i + h]),
-                    "y_pred": float(np.asarray(fc)[h - 1]),
+                    "y_pred": float(fc[h - 1]),
                 })
-            # advance state by one true observation, no refit
-            res = res.append(rest.iloc[i : i + 1], refit=False)
+            n_origins += 1
+            # Advance the state by the next `stride` true observations.
+            block = rest.iloc[i : i + stride]
+            if block.empty:
+                break
+            try:
+                res = res.extend(block)
+            except (AttributeError, NotImplementedError):  # pragma: no cover
+                res = res.append(block, refit=False)
 
-        print(f"[forecast]   ARIMA {district} done")
+        print(f"[forecast]   ARIMA {district}: {n_origins} origins")
 
     return pd.DataFrame(rows)
+
+
+# ======================================================================
+# Seasonal naive and ridge AR — the cheap models that must be beaten
+# ======================================================================
+
+def seasonal_naive(panel: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
+    """Last year's value on the same calendar day, 365 days back."""
+    rows = []
+    for district, grp in panel.groupby("district"):
+        grp = grp.sort_values("date").reset_index(drop=True)
+        y = grp[target].astype(float).to_numpy()
+        dates = grp["date"].to_numpy()
+        lag = 365
+        for i in range(lag - horizon, len(y) - horizon):
+            src = i + horizon - lag
+            if src < 0:
+                continue
+            rows.append({
+                "district": district,
+                "date": pd.Timestamp(dates[i]),
+                "y_true": float(y[i + horizon]),
+                "y_pred": float(y[src]),
+            })
+    return pd.DataFrame(rows)
+
+
+def run_ridge_ar(panel: pd.DataFrame, target: str, horizons: list[int],
+                 n_lags: int = 14) -> pd.DataFrame:
+    """Direct multi-horizon ridge regression on lags + seasonality.
+
+    One model per horizon, fitted on the training period only, shared
+    across districts after per-district standardisation whose mean and
+    standard deviation come from the training period only. Predictions are
+    returned on the original scale.
+    """
+    from sklearn.linear_model import Ridge
+
+    train_end, val_end = split_dates()
+    rows = []
+
+    frames = []
+    for district, grp in panel.groupby("district"):
+        grp = grp.sort_values("date").reset_index(drop=True)
+        g = grp[["district", "date", target]].copy()
+        tr = g[g["date"] <= train_end][target].astype(float)
+        mu = float(tr.mean())
+        sd = float(tr.std()) or 1.0
+        g["z"] = (g[target].astype(float) - mu) / sd
+        g["_mu"], g["_sd"] = mu, sd
+        for L in range(n_lags):
+            g[f"lag{L}"] = g["z"].shift(L)
+        doy = g["date"].dt.dayofyear
+        g["sin1"] = np.sin(2 * np.pi * doy / 365.25)
+        g["cos1"] = np.cos(2 * np.pi * doy / 365.25)
+        g["sin2"] = np.sin(4 * np.pi * doy / 365.25)
+        g["cos2"] = np.cos(4 * np.pi * doy / 365.25)
+        frames.append(g)
+
+    data = pd.concat(frames, ignore_index=True)
+    feats = [f"lag{L}" for L in range(n_lags)] + ["sin1", "cos1", "sin2", "cos2"]
+
+    for h in horizons:
+        work = data.copy()
+        work["y_future"] = work.groupby("district")["z"].shift(-h)
+        work = work.dropna(subset=feats + ["y_future"])
+        tr = work[work["date"] <= train_end]
+        te = work[work["date"] > val_end]
+        if tr.empty or te.empty:
+            continue
+
+        model = Ridge(alpha=1.0)
+        model.fit(tr[feats], tr["y_future"])
+        pred_z = model.predict(te[feats])
+
+        rows.append(pd.DataFrame({
+            "district": te["district"].to_numpy(),
+            "date": te["date"].to_numpy(),
+            "horizon": h,
+            "y_true": te["y_future"].to_numpy() * te["_sd"].to_numpy() + te["_mu"].to_numpy(),
+            "y_pred": pred_z * te["_sd"].to_numpy() + te["_mu"].to_numpy(),
+        }))
+        print(f"[forecast]   ridge_ar h={h}: {len(tr):,} train rows, {len(te):,} test rows")
+
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
 # ======================================================================
@@ -386,7 +506,47 @@ def run_lstm(panel: pd.DataFrame, target: str, horizons: list[int]) -> pd.DataFr
 # Orchestration
 # ======================================================================
 
-def run(target: str | None = None, use_lstm: bool = True) -> pd.DataFrame:
+def matched_comparison(preds: dict[str, pd.DataFrame], target: str,
+                       allow_mape: bool) -> pd.DataFrame:
+    """Re-score every model on the rows ALL of them predicted.
+
+    ARIMA is evaluated at strided forecast origins and only for districts
+    whose fit converged, so its row count is smaller than the baselines'.
+    Comparing MAE across different row sets is not a comparison at all —
+    a model evaluated on an easier subset wins for free. This restricts
+    every model to the intersection of (district, date, horizon) triples
+    and scores again, so the headline skill numbers are like for like.
+    """
+    keys = None
+    for df in preds.values():
+        k = set(zip(df["district"], pd.to_datetime(df["date"]), df["horizon"]))
+        keys = k if keys is None else (keys & k)
+    if not keys:
+        return pd.DataFrame()
+
+    rows = []
+    for name, df in preds.items():
+        d = df.copy()
+        d["date"] = pd.to_datetime(d["date"])
+        mask = [tuple(t) in keys for t in
+                zip(d["district"], d["date"], d["horizon"])]
+        d = d[mask]
+        for h, part in d.groupby("horizon"):
+            rows.append({"model": name, "horizon": int(h),
+                         **score(part["y_true"], part["y_pred"], allow_mape)})
+
+    table = pd.DataFrame(rows)
+    base = (table[table["model"] == "persistence"]
+            .set_index("horizon")["mae"].to_dict())
+    table["skill_vs_persistence"] = table.apply(
+        lambda r: 1 - r["mae"] / base[r["horizon"]] if base.get(r["horizon"]) else np.nan,
+        axis=1,
+    )
+    return table.sort_values(["horizon", "mae"]).reset_index(drop=True)
+
+
+def run(target: str | None = None, use_lstm: bool = True,
+        arima_stride: int | None = None) -> pd.DataFrame:
     target = target or CFG.forecast.target
     horizons = list(CFG.forecast.horizons)
     allow_mape = target != "rainfall_mm"          # see module docstring
@@ -401,7 +561,8 @@ def run(target: str | None = None, use_lstm: bool = True) -> pd.DataFrame:
     preds: dict[str, pd.DataFrame] = {}
 
     # --- baselines (evaluated on the test period only) -----------------
-    for name, fn in (("persistence", persistence), ("climatology", climatology)):
+    for name, fn in (("persistence", persistence), ("climatology", climatology),
+                     ("seasonal_naive", seasonal_naive)):
         frames = []
         for h in horizons:
             out = fn(panel, target, h)
@@ -410,8 +571,14 @@ def run(target: str | None = None, use_lstm: bool = True) -> pd.DataFrame:
         preds[name] = pd.concat(frames, ignore_index=True)
         print(f"[forecast] {name} done")
 
+    # --- ridge AR (the cheap learned model) ----------------------------
+    ridge = run_ridge_ar(panel, target, horizons)
+    if len(ridge):
+        preds["ridge_ar"] = ridge
+        print("[forecast] ridge_ar done")
+
     # --- ARIMA ---------------------------------------------------------
-    arima = run_arima(panel, target, horizons)
+    arima = run_arima(panel, target, horizons, stride=arima_stride)
     if len(arima):
         preds["arima"] = arima[arima["date"] > val_end]
 
@@ -445,9 +612,13 @@ def run(target: str | None = None, use_lstm: bool = True) -> pd.DataFrame:
     )
     table = table.sort_values(["horizon", "mae"]).reset_index(drop=True)
 
+    matched = matched_comparison(preds, target, allow_mape)
+
     out_dir = ROOT / CFG.outputs.reports
     out_dir.mkdir(parents=True, exist_ok=True)
     table.to_csv(out_dir / f"forecast_comparison_{target}.csv", index=False)
+    if len(matched):
+        matched.to_csv(out_dir / f"forecast_matched_{target}.csv", index=False)
     for name, df in preds.items():
         df.to_csv(out_dir / f"forecast_preds_{name}_{target}.csv", index=False)
 
@@ -466,6 +637,10 @@ def run(target: str | None = None, use_lstm: bool = True) -> pd.DataFrame:
     cols = ["model", "horizon", "mae", "rmse",
             ("mape" if allow_mape else "smape"), "skill_vs_persistence"]
     print(table[cols].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    if len(matched):
+        print("\nSAME ROWS FOR EVERY MODEL (intersection of forecast origins)")
+        print(matched[cols].to_string(index=False,
+                                      float_format=lambda x: f"{x:.4f}"))
     print("\nskill > 0 beats persistence · skill < 0 is worse than doing nothing")
     if loaders.is_fixture():
         print("\n*** SYNTHETIC FIXTURE — DO NOT REPORT THESE NUMBERS ***")
@@ -478,5 +653,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", default=None)
     ap.add_argument("--no-lstm", action="store_true")
+    ap.add_argument("--arima-stride", type=int, default=None,
+                    help="days between forecast origins (default: max horizon)")
     args = ap.parse_args()
-    run(target=args.target, use_lstm=not args.no_lstm)
+    run(target=args.target, use_lstm=not args.no_lstm,
+        arima_stride=args.arima_stride)

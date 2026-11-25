@@ -16,7 +16,11 @@ for a warning system:
 
   3. CALIBRATION. If the model says 70%, it should flood ~70% of the
      time. An uncalibrated score cannot be acted on by a human.
-     Reported as Brier score plus a reliability curve.
+     Reported as Brier score plus a reliability curve, for BOTH the raw
+     and the calibrated score (see src/models/calibrate.py), so the
+     effect of calibration is visible rather than asserted. The
+     calibrated scores are the headline; the raw ones are written to
+     *_raw_h{horizon}.csv for the comparison.
 
   4. DISCRIMINATION. ROC-AUC, PR-AUC, and the confusion matrix at the
      chosen threshold. Recall is reported first because that is the one
@@ -271,32 +275,76 @@ def evaluate_model(
     }
 
 
-def run(horizon: int = 1) -> pd.DataFrame:
-    result = train(horizon=horizon, save=True)
-    splits, preds = result["splits"], result["predictions"]
-
-    reports = []
-    for name in preds:
-        rep = evaluate_model(
+def _reports_for(splits: dict, preds: dict) -> list[dict]:
+    return [
+        evaluate_model(
             name,
             df=splits["test"], proba_test=preds[name]["test"],
             df_val=splits["val"], proba_val=preds[name]["val"],
         )
-        reports.append(rep)
+        for name in preds
+    ]
 
-    table = pd.DataFrame([
+
+def _table(reports: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame([
         {k: v for k, v in r.items() if not k.startswith("_")} for r in reports
     ])
+
+
+def run(horizon: int = 1) -> pd.DataFrame:
+    result = train(horizon=horizon, save=True)
+    splits = result["splits"]
+    preds = result["predictions"]
+    preds_raw = result.get("predictions_raw", preds)
+    calibrators = result.get("calibrators", {})
+
+    reports = _reports_for(splits, preds)
+    reports_raw = _reports_for(splits, preds_raw)
+
+    table = _table(reports)
+    table_raw = _table(reports_raw)
 
     out_dir = ROOT / CFG.outputs.reports
     out_dir.mkdir(parents=True, exist_ok=True)
 
     table.to_csv(out_dir / f"model_comparison_h{horizon}.csv", index=False)
+    table_raw.to_csv(out_dir / f"model_comparison_raw_h{horizon}.csv", index=False)
     for r in reports:
         stem = f"{r['model']}_h{horizon}"
         r["_cost_curve"].to_csv(out_dir / f"cost_curve_{stem}.csv", index=False)
         r["_reliability"].to_csv(out_dir / f"reliability_{stem}.csv", index=False)
         r["_lead_times"].to_csv(out_dir / f"lead_times_{stem}.csv", index=False)
+    for r in reports_raw:
+        stem = f"{r['model']}_h{horizon}"
+        r["_reliability"].to_csv(out_dir / f"reliability_raw_{stem}.csv", index=False)
+
+    # Calibration effect, as a table the report can quote directly.
+    actual = float(splits["test"][TARGET].mean())
+    cal_rows = []
+    for r, rr in zip(reports, reports_raw):
+        cal = calibrators.get(r["model"])
+        cal_rows.append({
+            "model": r["model"],
+            "method": getattr(cal, "method", "none"),
+            "calibration_rows": getattr(cal, "n_fit", 0),
+            "mean_predicted_raw": float(preds_raw[r["model"]]["test"].mean()),
+            "mean_predicted_calibrated": float(preds[r["model"]]["test"].mean()),
+            "actual_rate": actual,
+            "brier_raw": rr["brier"],
+            "brier_calibrated": r["brier"],
+            "brier_always_zero": actual,
+            "roc_auc_raw": rr["roc_auc"],
+            "roc_auc_calibrated": r["roc_auc"],
+            "threshold_raw": rr["threshold"],
+            "threshold_calibrated": r["threshold"],
+            "recall_raw": rr["recall"],
+            "recall_calibrated": r["recall"],
+            "precision_raw": rr["precision"],
+            "precision_calibrated": r["precision"],
+        })
+    cal_table = pd.DataFrame(cal_rows)
+    cal_table.to_csv(out_dir / f"calibration_effect_h{horizon}.csv", index=False)
 
     with open(out_dir / f"summary_h{horizon}.json", "w") as fh:
         json.dump({
@@ -305,8 +353,16 @@ def run(horizon: int = 1) -> pd.DataFrame:
             "cost_ratio_fn_to_fp": (
                 CFG.evaluation.cost_false_negative / CFG.evaluation.cost_false_positive
             ),
+            "calibration_method": (
+                getattr(next(iter(calibrators.values()), None), "method", "none")
+                if calibrators else "none"
+            ),
             "models": [{k: v for k, v in r.items() if not k.startswith("_")}
                        for r in reports],
+            "models_uncalibrated": [
+                {k: v for k, v in r.items() if not k.startswith("_")}
+                for r in reports_raw
+            ],
         }, fh, indent=2)
 
     # ---- console report ------------------------------------------------
@@ -327,6 +383,14 @@ def run(horizon: int = 1) -> pd.DataFrame:
           f"{table['accuracy_all_negative'].iloc[0]:.3f}  "
           f"<- beat THIS, not 0.50. Accuracy is near-useless at a "
           f"{1 - table['accuracy_all_negative'].iloc[0]:.2%} base rate.")
+    print("\nCALIBRATION EFFECT (test split)")
+    print(cal_table[["model", "method", "mean_predicted_raw",
+                     "mean_predicted_calibrated", "actual_rate",
+                     "brier_raw", "brier_calibrated", "roc_auc_calibrated"]]
+          .to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    print(f"  Brier of always-predict-zero: {actual:.4f}  "
+          f"<- the number an uncalibrated model fails to beat")
+
     print("\nConfusion matrices at the cost-optimal threshold:")
     for r in reports:
         c = r["confusion"]

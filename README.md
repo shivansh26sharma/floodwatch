@@ -1,10 +1,41 @@
 # FloodWatch
 
-Multimodal flood risk prediction and emergency response — 3rd-year ML project.
+District-level flood **onset** prediction for India, built entirely from freely
+available data — 3rd-year machine learning project, Thapar Institute.
 
-Anchored to a single documented historical event (**Kerala 2018**) so the system
-can be validated against what actually happened, rather than making untested
+The model answers one question for every district, every day: **will a flood
+begin here within the next seven days?** It is deployed as a public warning
+page with a technical console behind it:
+
+**[floodwatch26.streamlit.app](https://floodwatch26.streamlit.app)**
+
+Anchored to a documented historical event (**Kerala 2018**) so the system can
+be validated against what actually happened, rather than making untested
 predictions.
+
+### Headline results
+
+Measured on a held-out chronological test split — 56,210 district-days from
+2017–2023 containing 130 recorded flood onsets, with the alert threshold fixed
+on validation and applied unchanged.
+
+| | Logistic | Random forest | XGBoost |
+|---|---|---|---|
+| Events warned (of 130) | **86 — 66.2%** | 68 — 52.3% | 88 — 67.7% |
+| Median lead time | **13.0 days** | 5.0 days | 9.0 days |
+| Alarm duty cycle | 15.8% | **11.6%** | 17.0% |
+| PR-AUC | **0.082** | 0.046 | 0.043 |
+| Brier score | **0.0154** | 0.0159 | 0.0161 |
+| Expected cost at 20:1 | **16,490** | 16,637 | 16,772 |
+
+Logistic regression is the operational choice and the dashboard default: the
+lowest expected cost, the longest notice, the best Brier score. XGBoost finds
+two more events and pays 682 extra false alarms and four days of notice for
+them. The simplest model winning is a finding, not a failure — see
+*Two design decisions worth defending in the viva* below.
+
+Secondary task: **no forecasting method tested beats persistence** at
+predicting river discharge, at any horizon.
 
 ---
 
@@ -14,7 +45,7 @@ predictions.
 pip install -r requirements-dev.txt   # full local env
 ./scripts/run_pipeline.sh             # fixture -> dataset -> features -> train -> evaluate -> forecast
 streamlit run dashboard/app.py        # dashboard
-python -m pytest tests/ -v            # leakage + forecasting tests
+python -m pytest tests -q             # 25 tests: leakage, live, forecast, calibration
 ```
 
 Deploying it to a public URL: see **[DEPLOY.md](DEPLOY.md)**. The app
@@ -173,20 +204,38 @@ src/
                              terrain interactions, target shift, splits
   models/
     train_risk.py            Logistic / Random Forest / XGBoost
+    calibrate.py             isotonic map fitted on out-of-sample train rows
     evaluate.py              lead time, cost threshold, calibration, ROC/PR
     explain.py               SHAP global + per-district-day local
-    forecast.py              persistence / climatology / ARIMA / LSTM
+    forecast.py              persistence / climatology / seasonal-naive /
+                             ridge AR / ARIMA / LSTM
   features/
     reference.py             train-fitted climatology, percentile grids and
                              medians, saved for serving  [anti-skew]
   live/
     fetch.py                 current + 16-day forecast feed (Open-Meteo)
     predict.py               scores today and the next N days
-dashboard/app.py             Streamlit console: Live / Replay / Model / Data
+dashboard/app.py             public warning page + technical console
+                             (Live / Replay / Model / Data)
 tests/test_no_leakage.py     leakage guards for the classifier
 tests/test_forecast.py       baseline-correctness + metric guards
 tests/test_live.py           train/serve-skew guards for the live path
+tests/test_calibration.py    monotonicity, Brier, no-future-data folds
 ```
+
+**25 tests, all passing.** They are the enforcement mechanism for everything
+claimed under *leakage controls* — run them before you believe a number.
+
+### Two faces, one app
+
+The sidebar switches between them:
+
+- **Public warning page** (default) — one district, the chance stated as odds
+  ("about 1 in 30"), a week-ahead chart, a map, what to do, and a plain
+  statement that this is a student prototype and not an official warning.
+  Model names, thresholds, AUC and duty cycle are deliberately *absent*.
+- **Technical console** — live operations, historical replay with SHAP,
+  model performance, and data provenance. The evidence behind the page.
 
 ## Live / forward prediction
 
@@ -249,11 +298,25 @@ zero, and rainfall is zero most days. The module reports sMAPE instead and
 says so. (Watch out: on zero-inflated series sMAPE saturates near 200% for
 every model, so it barely discriminates — use MAE to rank.)
 
-**ARIMA walks forward without refitting.** It is fitted once on train, then
-advanced through the test period with `append(refit=False)`, so each forecast
-origin only ever sees past data. Refitting at every origin is more rigorous
-and far too slow for 8 districts × 2 years — state that compromise in the
-report rather than leaving it implicit.
+**ARIMA walks forward without refitting.** It is fitted once per district on
+train, then advanced through the test period with `extend`, so each forecast
+origin only ever sees past data. Refitting the parameters at every origin is
+more rigorous and far too slow — that compromise is stated in the report
+rather than left implicit.
+
+> The first version used `append(refit=False)`, which re-filters the entire
+> series on *every* call — O(n²) Kalman passes. It ran for over an hour on 22
+> districts without finishing. `extend` continues from the existing filtered
+> state, which is what a walk-forward loop actually needs: same forecasts,
+> about a second per district.
+
+**Models are compared on identical rows.** ARIMA is evaluated at strided
+origins and only in districts where the fit converged, so scoring it on its
+own output compares it against baselines on a different, easier row set — it
+appeared to beat persistence at 7 days by 1% of MAE. `matched_comparison`
+restricts every method to the forecast origins all of them produced; the
+advantage vanishes (+0.010 → −0.001). `forecast_matched_*.csv` is the table
+to cite; `forecast_comparison_*.csv` is the unmatched one.
 
 ---
 
@@ -278,8 +341,20 @@ Also deliberate:
 - **The threshold is not 0.5.** It is chosen on the validation split to
   minimise expected cost at a 20:1 miss-to-false-alarm ratio (`config.yaml`),
   then applied unchanged to test. Picking it on test would be cheating.
-- **Calibration is reported** (Brier + reliability curve). If the model says
-  70%, it should flood ~70% of the time, or an officer cannot act on it.
+- **The output is a calibrated probability.** Class reweighting is what lets
+  the model see a 1.6% positive class at all, and it is also what destroys the
+  probability scale: raw mean predicted risk was 0.269 against an actual onset
+  rate of 0.016, and every model lost to always-predicting-zero on Brier.
+  `src/models/calibrate.py` fits a monotone isotonic map on 90,332
+  out-of-sample predictions from the **training period only** — the validation
+  split is already spent choosing the threshold — and pickles it with the
+  model, so the dashboard and the live scorer apply exactly what was fitted at
+  training time. Logistic Brier falls 0.162 → 0.015.
+- **The threshold then lands where theory says it should.** At a 20:1 cost
+  ratio the optimal alarm point is 1/21 = 0.048. Sweeping validation returns
+  0.03, 0.06 and 0.09 for the three models. Before calibration the same sweep
+  returned 0.71 and 0.41, because the threshold was absorbing the inflation
+  rather than expressing a decision rule.
 - **Logistic Regression is a real baseline.** If RF and XGBoost don't beat it,
   report that. It's a finding, not a failure.
 - **Climatology is fitted on the training period only** — a subtle and very
@@ -292,10 +367,12 @@ Also deliberate:
 Worth knowing before anyone asks why precision is 6%.
 
 Kerala, August 2018. The flood peaked on 15–17 August; Thrissur was badly
-hit. Score that week and the logistic model gives Thrissur **0.749 on the
-14th, 0.910 on the 15th, 0.802 on the 16th**, against an alert threshold of
-0.71. It raised the alarm two days early and held it through the peak.
-Discharge went from 21 to 85 m3/s in two days.
+hit. Score that week and the logistic model gives Thrissur **0.031 on the
+14th, 0.085 on the 15th, 0.047 on the 16th** — calibrated probabilities,
+against an alert threshold of 0.03 and a base rate of 0.016. It raised the
+alarm two days early, held it through the peak, and at its height put the
+district at more than five times normal risk. Discharge went from 22 to
+85 m3/s in two days.
 
 The label for every one of those days is **0**, so every one of those alarms
 was counted as a false positive.
@@ -313,10 +390,10 @@ Two separate failures stack up:
    3 km — outside the footprint. Palakkad and Wayanad miss it too.
 
 Across the Kerala basin, 11–20 August 2018, the model raised 21 district-day
-alarms in 7 districts, all scored false. That one episode is 0.3% of the
-logistic model's 7,740 reported false positives.
+alarms in 7 districts, all scored false — a fraction of a per cent of the
+logistic model's 8,370 reported false positives, from one episode.
 
-**What this means for the numbers.** The reported precision of 0.06 is
+**What this means for the numbers.** The reported precision of 0.057 is
 *pessimistic by an unknown amount*, because an unknown share of the false
 alarms are real floods the archive does not record. That is a much stronger
 thing to say than "precision is low because of the cost ratio", and it is
@@ -342,36 +419,71 @@ which is why the dashboard defaults to logistic regression.
 
 ---
 
-## Team split (4 people, all start week 1)
+## The team
 
-| Owner | Module | Files |
-|---|---|---|
-| **P1** | Data pipeline + risk classifier | `src/data/`, `src/models/train_risk.py` |
-| **P2** | Forecasting (ARIMA + LSTM) | `src/models/forecast.py` *(to write)* |
-| **P3** | Speech + NLP citizen reports | `src/nlp/` *(to write)* |
-| **P4** | Dashboard + integration | `dashboard/`, fusion layer |
+| | |
+|---|---|
+| Shivansh Sharma | 1024030732 |
+| Ishaan Bhalla | 1024030950 |
+| Pushp Batheja | 1024030941 |
 
-**P4 starts in week 1 against the fixture.** Teams that leave integration to
-week 7 are the teams that demo a broken system.
+Supervisor: **Dr. Mahak Gambhir**, Department of Computer Science and
+Engineering, Thapar Institute of Engineering and Technology, Patiala.
 
 ---
 
-## 8-week plan
+## What shipped, and what was dropped
 
-| Week | Deliverable |
+The original proposal was a multimodal system: riverine risk classification,
+satellite inundation segmentation, speech-to-text on citizen voice reports, a
+fusion layer and a GIS dashboard. Scoping it down to one thing done properly
+was the right call, and the report says so rather than implying the rest was
+always out of scope.
+
+**Shipped.** The riverine core end to end: dataset build, 59 leakage-controlled
+features, three calibrated classifiers, cost-sensitive thresholding, lead-time
+evaluation, five forecasting baselines, SHAP explanations, live forward
+prediction from a public feed, a public warning page and a technical console,
+a deployed URL, 25 tests, and a 25-page report.
+
+**Dropped, deliberately.** Satellite CV (Sen1Floods11 segmentation) and the
+speech/NLP citizen-report track — both were a project each, and neither would
+have been honest in the time available. The console reserves a place for the
+citizen-report feed.
+
+**Not run.** The LSTM forecasting baseline. On the evidence of the five methods
+that did run, it would have to beat persistence to be worth deploying, and
+nothing else did.
+
+---
+
+## Reproducing the reported numbers
+
+```bash
+pip install -r requirements-dev.txt
+python -m src.data.download                      # ~30 min, rate-limited
+python -m src.data.build_dataset
+python -m src.features.build_features --horizon 1
+python -m src.models.evaluate  --horizon 1       # trains, calibrates, evaluates
+python -m src.models.forecast  --no-lstm
+python -m pytest tests -q                        # 25 passed
+```
+
+Every table in the report comes from `outputs/reports/`. The ones worth
+knowing:
+
+| File | What it holds |
 |---|---|
-| 1 | Lock anchor event; download rainfall + river data; dashboard skeleton running |
-| 2 | Real loaders implemented; dataset built; EDA |
-| 3–4 | Risk classifier: baseline → RF → XGBoost, + SHAP |
-| 4–5 | Forecasting: ARIMA vs LSTM, chronological splits |
-| 5–6 | Whisper transcription + report classifier |
-| 6–7 | Fusion logic + dashboard integration |
-| 8 | Evaluation, error analysis, report, **demo rehearsal** |
+| `model_comparison_h1.csv` | the headline table, calibrated |
+| `model_comparison_raw_h1.csv` | the same models before calibration |
+| `calibration_effect_h1.csv` | before/after means and Brier scores |
+| `reliability_*_h1.csv` | reliability curves, `_raw_` = uncalibrated |
+| `lead_times_*_h1.csv` | per-event lead time, including the misses |
+| `forecast_matched_*.csv` | forecasting, all methods on identical rows |
 
-Stretch goals, only once the core runs end to end: satellite segmentation
-(use **Sen1Floods11**, never raw Sentinel-1), road reachability via OSMnx +
-NetworkX, population impact overlay (WorldPop), and the flash-flood track on
-half-hourly GPM IMERG.
+`outputs/reports/forecast_preds_*.csv` (the per-row predictions behind the
+forecasting tables) are gitignored — they are 18–28 MB each and regenerate in
+minutes.
 
 ---
 

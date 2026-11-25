@@ -1,0 +1,72 @@
+{
+  "target": "river_discharge_m3s",
+  "horizons": [
+    1,
+    3,
+    7
+  ],
+  "synthetic_fixture": false,
+  "mape_reported": true,
+  "results": [
+    {
+      "model": "persistence",
+      "horizon": 1,
+      "mae": 36.92280492185615,
+      "rmse": 307.6207284569364,
+      "smape": 8.099471406107636,
+      "n": 186515,
+      "mape": 7.9039440425229746,
+      "skill_vs_persistence": 0.0
+    },
+    {
+      "model": "climatology",
+      "horizon": 1,
+      "mae": 161.97238647737956,
+      "rmse": 1089.1743683734005,
+      "smape": 40.76876988169863,
+      "n": 186515,
+      "mape": 280.6574315370133,
+      "skill_vs_persistence": -3.386784449886183
+    },
+    {
+      "model": "persistence",
+      "horizon": 3,
+      "mae": 94.80517156823294,
+      "rmse": 757.1695596518939,
+      "smape": 18.578728643973673,
+      "n": 186369,
+      "mape": 20.860957994024997,
+      "skill_vs_persistence": 0.0
+    },
+    {
+      "model": "climatology",
+      "horizon": 3,
+      "mae": 162.09398433513277,
+      "rmse": 1089.6007617808566,
+      "smape": 40.78621449087727,
+      "n": 186369,
+      "mape": 280.84661571468774,
+      "skill_vs_persistence": -0.70975888397049
+    },
+    {
+      "model": "persistence",
+      "horizon": 7,
+      "mae": 153.90165802329145,
+      "rmse": 1149.4433224435716,
+      "smape": 29.542815615649697,
+      "n": 186077,
+      "mape": 44.905031227275664,
+      "skill_vs_persistence": 0.0
+    },
+    {
+      "model": "climatology",
+      "horizon": 7,
+      "mae": 162.3324007562778,
+      "rmse": 1090.454600146428,
+      "smape": 40.817793844836366,
+      "n": 186077,
+      "mape": 281.21788268552484,
+      "skill_vs_persistence": -0.05478006436883498
+    }
+  ]
+}
