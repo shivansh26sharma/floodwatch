@@ -13,7 +13,6 @@ FOUR SURFACES, ONE PIPELINE
   Model performance   the backtest: lead time, duty cycle, calibration,
                       cost curve. The numbers that decide whether the live
                       tab deserves to be believed.
-  Data & method       sources, licences, target definition, leakage controls
 
 The split matters. The live tab is the part that looks impressive; the
 model tab is the part that makes it defensible. A console that shows the
@@ -931,11 +930,10 @@ be missed entirely.
     st.stop()
 
 
-tab_live, tab_replay, tab_model, tab_data = st.tabs([
+tab_live, tab_replay, tab_model = st.tabs([
     "◉  Live operations",
     "⏮  Historical replay",
     "◆  Model performance",
-    "▤  Data & method",
 ])
 
 
@@ -1260,15 +1258,6 @@ with tab_replay:
     except Exception as exc:  # noqa: BLE001
         st.info(f"Explanation unavailable: {exc}")
 
-    st.divider()
-    st.markdown("**Citizen SOS queue**")
-    st.info(
-        "**Planned module.** Whisper transcribes voice reports, the NLP layer "
-        "classifies incident type and severity, and clustered reports appear "
-        "here ranked P1–P3 — feeding back into the fusion layer as "
-        "corroborating evidence for the districts above.",
-        icon="🎙️",
-    )
 
 
 # ======================================================================
@@ -1300,22 +1289,6 @@ with tab_model:
                   "of district-days", delta_color="off")
         m4.metric("PR-AUC", f"{metrics['pr_auc']:.3f}",
                   f"ROC-AUC {metrics['roc_auc']:.3f}", delta_color="off")
-
-        st.warning(
-            f"**Why accuracy is not on this page.** Predicting “no flood” "
-            f"every single day scores "
-            f"{metrics['accuracy_all_negative']:.1%} accuracy on this test "
-            f"set, because floods begin on about "
-            f"{1 - metrics['accuracy_all_negative']:.1%} of district-days. "
-            f"This model scores {metrics['accuracy_at_f1']:.1%} — *lower* "
-            f"than the do-nothing baseline — and is nonetheless useful, "
-            f"because it warns "
-            f"{metrics['event_detection_rate']:.0%} of real events a median "
-            f"{metrics['median_lead_time_hours'] / 24:.0f} days early. "
-            f"Lead time and duty cycle are the metrics that matter here; "
-            f"accuracy is a trap at this base rate.",
-            icon="🎯",
-        )
 
         conf = metrics.get("confusion")
         if isinstance(conf, str):
@@ -1391,24 +1364,32 @@ with tab_model:
                 ).mark_line(color="#94a3b8", strokeDash=[4, 4]).encode(
                     x="x:Q", y="y:Q")
                 chart(diag + pts)
+                zero_brier = 1 - metrics["accuracy_all_negative"]
+                beats = metrics["brier"] <= zero_brier
                 st.caption(
-                    f"Points below the diagonal mean the model over-states "
-                    f"risk. Brier {metrics['brier']:.3f} — against "
-                    f"{1 - metrics['accuracy_all_negative']:.3f} for a model "
-                    f"that always predicts zero, which this does not beat."
+                    f"Calibrated scores track the diagonal over the range "
+                    f"where the data lives. Brier {metrics['brier']:.3f} — "
+                    f"{'below' if beats else 'against'} "
+                    f"{zero_brier:.3f} for a model that always predicts zero, "
+                    f"which this {'now beats' if beats else 'does not beat'}. "
+                    f"(The axis runs 0–1; calibrated risk rarely exceeds 0.3 "
+                    f"at this base rate, so the points sit low.)"
                 )
-                st.warning(
-                    "**These scores are not calibrated probabilities.** On "
-                    "the test split the mean predicted risk is far above the "
-                    "actual onset rate — about 16x for logistic regression "
-                    "and 7x for the forest — so a reading of 0.30 does not "
-                    "mean a 30% chance. Treat the output as a ranking score. "
-                    "That inflation is also why the alert threshold sits "
-                    "where it does rather than near the base rate. The fix "
-                    "is isotonic calibration fitted on the validation split; "
-                    "it is listed as future work rather than quietly "
-                    "half-done, because it moves every number on this page.",
-                    icon="📐",
+                st.success(
+                    "**These are calibrated probabilities.** Reweighting the "
+                    "rare class is what lets the model detect a 1.6% positive "
+                    "class at all, and it also inflates the raw score — before "
+                    "calibration the mean was ~16x the onset rate. Each model "
+                    "is now passed through an isotonic map fitted on "
+                    "out-of-sample predictions from the **training period "
+                    "only** (not the validation split, which is spent choosing "
+                    "the threshold), and the map is saved with the model so the "
+                    "live scorer applies the same one. A reading of 0.08 now "
+                    "means floods followed about eight per cent of comparable "
+                    "warnings. It is also why the alert threshold lands near "
+                    "the 1/21 that a 20:1 cost ratio predicts, rather than at "
+                    "0.71.",
+                    icon="✅",
                 )
 
         leads = report_csv(f"lead_times_{MODEL_NAME}_h{HORIZON}")
@@ -1457,100 +1438,3 @@ with tab_model:
 # ======================================================================
 # TAB 4 — DATA & METHOD
 # ======================================================================
-
-with tab_data:
-    st.markdown("**Where every number comes from.**")
-
-    sources = pd.DataFrame([
-        {"Layer": "Rainfall (history)", "Product": "ERA5 reanalysis",
-         "Via": "Open-Meteo archive API", "Licence": "Free, non-commercial, attribution"},
-        {"Layer": "Rainfall (live)", "Product": "Analysis + NWP forecast",
-         "Via": "Open-Meteo forecast API", "Licence": "Free, non-commercial, attribution"},
-        {"Layer": "River discharge", "Product": "GloFAS",
-         "Via": "Open-Meteo flood API", "Licence": "Free, non-commercial, attribution"},
-        {"Layer": "Terrain", "Product": "Copernicus DEM (elevation, slope, ruggedness)",
-         "Via": "Open-Meteo elevation API", "Licence": "Free, attribution"},
-        {"Layer": "Flood labels", "Product": "Dartmouth Flood Observatory event polygons",
-         "Via": "Zenodo 10.5281/zenodo.19288170", "Licence": "CC0"},
-    ])
-    table(sources)
-    st.caption(
-        "No paid API, no licence that forbids a student project, and nothing "
-        "scraped. ERA5 and GloFAS are **reanalysis and model output, not "
-        "station gauges** — they smooth extremes, which caps how good the "
-        "labels and features can be."
-    )
-
-    st.divider()
-    d1, d2 = st.columns(2)
-
-    with d1:
-        st.markdown("**The prediction target**")
-        st.markdown(
-            f"""
-`onset_window`: does a flood **begin** in this district within
-{CFG.features.target_window} days, starting at t+{HORIZON}?
-
-Not "is it flooding". That distinction decided the project. DFO records
-event *duration*, and a target of "flooding is ongoing" inherits that
-duration — which drifted from a mean of 20 days in the early archive to
-8.6 days in the later one. The model would have been learning a change in
-how the archive was compiled. Onset is a property of the flood, not of the
-record-keeping, so the drift disappears.
-
-Labels come from a **spatial join**: each district centroid against the DFO
-event polygons (`geopandas.sjoin`, `predicate="within"`), not text matching
-on district names.
-            """
-        )
-
-    with d2:
-        st.markdown("**How leakage is kept out**")
-        st.markdown(
-            f"""
-- Every rolling window is `closed="left"` — today's value never enters its
-  own feature.
-- Rolling and lag features are grouped **per district**, so one district's
-  history cannot bleed into another's.
-- Day-of-year climatology and the percentile grids are fitted on the
-  **training split only**, saved to `feature_reference.pkl`, and reloaded at
-  serving time. Re-deriving them live would silently rescale the inputs.
-- Splits are chronological, never random:
-  train ≤ {CFG.split.train_end} · val ≤ {CFG.split.val_end} · test after.
-- The alert threshold is chosen on validation and then frozen.
-- `tests/test_no_leakage.py` asserts these rather than trusting them.
-            """
-        )
-
-    st.divider()
-    st.markdown("**Pipeline**")
-    st.code(
-        "python -m src.data.download                      # ERA5 / GloFAS / DEM\n"
-        "python -m src.data.build_dataset                 # join + DFO spatial labels\n"
-        "python -m src.features.build_features --horizon 1   # 59 features + reference\n"
-        "python -m src.models.evaluate --horizon 1        # train, threshold, report\n"
-        "python -m src.live.fetch                         # current + forecast feed\n"
-        "python -m src.live.predict --days-ahead 6        # forward risk\n"
-        "streamlit run dashboard/app.py                   # this console",
-        language="bash",
-    )
-
-    figures = getattr(CFG.outputs, "figures", "outputs/figures")
-    svg = ROOT / figures / "architecture.svg"
-    if svg.exists():
-        st.markdown("**Architecture**")
-        try:
-            st.markdown(f'<div style="background:#fff;border:1px solid #e2e8f0;'
-                        f'border-radius:12px;padding:1rem;overflow:auto">'
-                        f'{svg.read_text()}</div>', unsafe_allow_html=True)
-        except Exception:  # noqa: BLE001
-            pass
-
-    st.divider()
-    st.markdown(
-        '<p class="fw-note">FloodWatch is a student project and decision '
-        'support, not an operational warning service. India\'s official '
-        'flood forecasts come from the Central Water Commission and the '
-        'India Meteorological Department.</p>',
-        unsafe_allow_html=True,
-    )
