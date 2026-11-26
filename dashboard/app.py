@@ -382,8 +382,13 @@ def load_model(name: str, horizon: int):
     path = ROOT / CFG.outputs.models / f"risk_{name}_h{horizon}.pkl"
     if not path.exists():
         return None
-    with open(path, "rb") as fh:
-        return pickle.load(fh)
+    try:
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+    except Exception:  # noqa: BLE001
+        # e.g. an XGBoost pickle on a server where xgboost is not installed.
+        # Treat it as "model not available" instead of crashing the page.
+        return None
 
 
 @st.cache_data
@@ -393,7 +398,13 @@ def scored_frame(name: str, horizon: int) -> pd.DataFrame:
     if df.empty or bundle is None:
         return pd.DataFrame()
     df = df.copy()
-    df["risk"] = bundle["model"].predict_proba(df[bundle["features"]])[:, 1]
+    raw = bundle["model"].predict_proba(df[bundle["features"]])[:, 1]
+    # Apply the calibration map that was fitted at training time, so the
+    # console shows the same calibrated probabilities as the report and the
+    # live scorer. Without it the scores are inflated ranking scores.
+    calibrator = bundle.get("calibrator")
+    df["risk_raw"] = raw
+    df["risk"] = calibrator.transform(raw) if calibrator is not None else raw
     return df
 
 
@@ -422,6 +433,8 @@ def available_models(horizon: int) -> list[str]:
     the summary means the console never offers a model it cannot score.
     """
     models = [m["model"] for m in summary(horizon).get("models", [])]
+    # Only offer models whose trained file actually loads on this server.
+    models = [m for m in models if load_model(m, horizon) is not None]
     return models or [DEFAULT_MODEL]
 
 
